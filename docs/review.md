@@ -111,10 +111,10 @@ full locked graph is reviewed together.
 
 ## Residual operational work
 
-- configure `HOMEBREW_TAP_TOKEN`, then publish the first tag from the protected
-  branch; release archives, checksums, SPDX SBOM, build provenance, and the
-  Homebrew formula PR are automated for four native platform/architecture
-  pairs;
+- release archives, checksums, SPDX SBOM, build provenance, and the Homebrew
+  formula PR are automated for four native platform/architecture pairs; the
+  manual **Homebrew formula** workflow can recreate a formula PR from an
+  already published tag;
 - continue running the Rust 1.82 CI job on every dependency update; the exact
   MSRV toolchain is not installed on the development Mac;
 - add a noninteractive CI SSH fixture if stable Herdr test binaries become

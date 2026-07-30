@@ -1,0 +1,86 @@
+name: Homebrew formula
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing Herdr Fwd release tag, for example v0.1.4
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: homebrew-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: propose formula update
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      TAG: ${{ inputs.tag }}
+      GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+    steps:
+      - name: Verify tap credentials
+        run: |
+          if [[ -z "$GH_TOKEN" ]]; then
+            echo "HOMEBREW_TAP_TOKEN is not configured" >&2
+            exit 1
+          fi
+          if [[ "$(gh api repos/go-min/homebrew-tap --jq '.permissions.push')" != true ]]; then
+            echo "HOMEBREW_TAP_TOKEN cannot write to go-min/homebrew-tap" >&2
+            exit 1
+          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.tag }}
+          path: herdr-fwd
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: go-min/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: homebrew-tap
+      - name: Download published checksums
+        run: >-
+          gh release download "$TAG"
+          --repo go-min/herdr-fwd
+          --pattern SHA256SUMS
+          --dir release
+      - name: Render and propose formula
+        run: |
+          set -euo pipefail
+          formula="$RUNNER_TEMP/herdr-fwd.rb"
+          herdr-fwd/scripts/render-homebrew-formula.sh "$TAG" release/SHA256SUMS "$formula"
+
+          version="${TAG#v}"
+          branch="herdr-fwd-$version"
+          cd homebrew-tap
+          if git ls-remote --exit-code --heads origin "$branch" >/dev/null; then
+            git fetch origin "$branch"
+            git switch -C "$branch" FETCH_HEAD
+          else
+            git switch -c "$branch"
+          fi
+          cp "$formula" Formula/herdr-fwd.rb
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add Formula/herdr-fwd.rb
+          if ! git diff --cached --quiet; then
+            git commit -m "herdr-fwd $version"
+            git push --set-upstream origin "$branch"
+          fi
+
+          existing_pr="$(gh pr list --repo go-min/homebrew-tap \
+            --base main --head "$branch" --state open \
+            --json url --jq '.[0].url // empty')"
+          if [[ -n "$existing_pr" ]]; then
+            echo "Homebrew pull request already exists: $existing_pr"
+          else
+            gh pr create --repo go-min/homebrew-tap \
+              --base main --head "$branch" \
+              --title "herdr-fwd $version" \
+              --body "Update herdr-fwd to [$TAG](https://github.com/go-min/herdr-fwd/releases/tag/$TAG)."
+          fi

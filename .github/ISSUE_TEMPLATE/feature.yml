@@ -1,0 +1,30 @@
+name: Feature request
+description: Propose a focused improvement to Herdr Fwd
+title: "feat: "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What remote forwarding workflow or limitation should change?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Include CLI or plugin lifecycle examples when relevant.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: checkboxes
+    id: constraints
+    attributes:
+      label: Constraints
+      options:
+        - label: This proposal does not require arbitrary remote commands or non-loopback listeners.
+          required: true

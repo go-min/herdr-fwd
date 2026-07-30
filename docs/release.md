@@ -8,11 +8,13 @@ Releases are immutable GitHub tags with native archives for:
 Each archive contains the local wrapper, remote plugin binary, manifest,
 license, README, and version marker. `SHA256SUMS` covers every archive and the
 SPDX JSON software bill of materials. GitHub build-provenance attestations are
-disabled while the repository is private because they require a paid GitHub
-plan.
+published for the native archives.
 
-Homebrew formula publication is deliberately disabled. GitHub Releases remain
-independent and do not require a Homebrew tap credential.
+Every tag release verifies `HOMEBREW_TAP_TOKEN`, exercises the rendered formula
+on Linux and macOS, then proposes a formula update in `go-min/homebrew-tap`.
+The release itself remains independent: a missing or invalid tap credential
+fails before the formula proposal and does not alter the immutable release
+artifacts.
 
 ## Prepare
 
@@ -38,9 +40,13 @@ git push origin v0.1.0
 ```
 
 The tag-triggered workflow verifies version consistency, tests and builds all
-four platforms, creates consistent package layouts, publishes checksums and
-provenance, and creates the GitHub Release. It does not run for branches or
-untagged commits.
+four platforms, creates consistent package layouts, publishes checksums, SPDX
+SBOM, and provenance, creates the GitHub Release, then opens or updates the
+matching Homebrew formula PR. It does not run for branches or untagged commits.
+
+For an already published release whose formula PR must be recreated, run the
+**Homebrew formula** workflow manually with the exact tag. It downloads the
+published `SHA256SUMS` rather than rebuilding or replacing the release.
 
 After publication, verify one `install.sh` installation, then run `doctor` and
 the manual remote forwarding scenario. Do not move or recreate a published tag;

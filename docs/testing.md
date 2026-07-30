@@ -110,17 +110,18 @@ Provision the default Lima VM and attach a Herdr client in one command:
 make lima-run
 ```
 
-Use `make attach` when the VM and linked plugin are already current. For a
-non-Lima SSH target, `make run TARGET=developer@host` syncs and links this
-checkout before attaching, while `make attach TARGET=developer@host` skips the
-sync. If only the release binary is needed, run:
+Use `make attach` when the VM is already provisioned. For a non-Lima SSH target,
+`make run TARGET=developer@host` builds the local wrapper and uses the production
+remote lifecycle; the remote receives neither this checkout nor a Cargo build.
+`hfwd` first requests Herdr's version-pinned GitHub install, then falls back to
+a checksum-verified binary for the remote platform only when GitHub is
+unavailable. Build just the local release binaries with:
 
 ```bash
 make build
 ```
 
-Inside the attached remote Herdr UI, the checkout is already the home
-directory, so create the fixture topology without changing directories:
+For a fixture topology, run the development server from this local checkout:
 
 ```bash
 make serve

@@ -48,7 +48,7 @@ Herdr does not execute manifest build commands for a linked checkout. Build the
 plugin binary first, then link it:
 
 ```bash
-make plugin-build
+make build
 herdr plugin link "$PWD"
 ```
 
@@ -59,18 +59,19 @@ herdr plugin unlink herdr.fwd
 herdr plugin install go-min/herdr-fwd
 ```
 
-## Remote development
+## Remote lifecycle development
 
-Sync this checkout to an SSH target, build the plugin on that target, link it,
-and attach with:
+`make run` builds the local `hfwd` wrapper and exercises its production remote
+lifecycle:
 
 ```bash
 make run TARGET=developer@dev.example.test
 ```
 
-Both hosts need `rsync`; the remote host also needs Rust/Cargo. The synchronized
-checkout lives under `~/.cache/herdr-fwd/dev-plugin`, while its remote-native
-Cargo target cache is preserved between runs.
+The remote host never receives a source checkout and never builds the plugin
+with Cargo. `hfwd` first asks remote Herdr to install the version-pinned GitHub
+release; if the remote cannot reach GitHub, it transfers only a checksum-verified
+release binary for that remote OS/architecture.
 
 Use the disposable Lima environment for the repeatable Linux/SSH topology:
 

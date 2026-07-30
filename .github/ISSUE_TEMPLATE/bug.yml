@@ -1,0 +1,58 @@
+name: Bug report
+description: Report reproducible incorrect or unsafe behavior
+title: "bug: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Do not include credentials, tokens, private hostnames, or live configuration.
+  - type: input
+    id: hfwd_version
+    attributes:
+      label: Herdr Fwd version
+      description: Output of `hfwd --version` or the plugin version from `herdr plugin list --json`.
+    validations:
+      required: true
+  - type: input
+    id: herdr_version
+    attributes:
+      label: Herdr version
+      placeholder: Output of `herdr --version`
+    validations:
+      required: true
+  - type: textarea
+    id: topology
+    attributes:
+      label: Local and remote environment
+      description: Include redacted OS, architecture, and whether the failure occurs locally, remotely, or through SSH.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      description: Provide the smallest safe command sequence and relevant redacted output.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I reproduced this with the latest release.
+          required: true
+        - label: I removed credentials and private host information.
+          required: true

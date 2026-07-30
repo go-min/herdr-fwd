@@ -33,7 +33,7 @@ $(error usage: run, attach, and lima-run must be invoked separately)
 endif
 endif
 
-.PHONY: help fmt fmt-check lint test build package package-smoke release-check ci manifest-check scripts-check \
+.PHONY: help fmt fmt-check lint markdown-check markdown-fix deps-check test build package package-smoke release-check ci manifest-check scripts-check \
 	install uninstall run attach serve lima-up lima-run lima-down lima-destroy \
 	lima-status lima-shell
 
@@ -63,6 +63,15 @@ fmt-check:
 lint:
 	$(CARGO) clippy --locked --all-targets --all-features -- -D warnings
 
+markdown-check: ## Core|Check Markdown formatting
+	npx --yes markdownlint-cli2@0.23.1 "**/*.md"
+
+markdown-fix: ## Core|Format fixable Markdown violations
+	npx --yes markdownlint-cli2@0.23.1 --fix "**/*.md"
+
+deps-check: ## Core|Run dependency policy checks
+	$(CARGO) deny check
+
 test: ## Core|Run unit and integration tests
 	$(CARGO) test --locked --all-targets
 
@@ -81,7 +90,7 @@ scripts-check:
 		scripts/check-manifest.py scripts/test-dev-server
 	scripts/test-dev-server --self-test
 
-ci: fmt-check lint test build manifest-check scripts-check package-smoke ## Core|Run every local CI check
+ci: fmt-check lint markdown-check test build manifest-check scripts-check package-smoke ## Core|Run every local CI check
 
 package: build
 	scripts/package-release.sh "$$(rustc -vV | sed -n 's/^host: //p')"

@@ -31,6 +31,8 @@ jobs:
       - run: cargo clippy --all-targets --locked --all-features -- -D warnings
       - run: cargo build --release --locked
       - if: matrix.os == 'ubuntu-latest'
+        run: make markdown-check
+      - if: matrix.os == 'ubuntu-latest'
         run: make manifest-check scripts-check
       - if: matrix.os == 'ubuntu-latest'
         run: shellcheck install.sh uninstall.sh scripts/*.sh scripts/test-server.sh
