@@ -38,7 +38,6 @@ cat > "$output" <<EOF
 class HerdrFwd < Formula
   desc "Automatic loopback port forwarding for remote Herdr sessions"
   homepage "$repository"
-  version "$version"
   license "MIT"
 
   on_macos do

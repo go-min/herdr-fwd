@@ -17,7 +17,10 @@ EOF
 sh "$root/scripts/render-homebrew-formula.sh" v1.2.3 "$checksums" "$formula"
 ruby -c "$formula" >/dev/null
 grep -F 'class HerdrFwd < Formula' "$formula" >/dev/null
-grep -F 'version "1.2.3"' "$formula" >/dev/null
+if grep -F 'version "1.2.3"' "$formula" >/dev/null; then
+  printf 'formula test: renderer emitted redundant version metadata\n' >&2
+  exit 1
+fi
 grep -F 'herdr-fwd-linux-x86_64.tar.gz' "$formula" >/dev/null
 grep -F 'sha256 "1111111111111111111111111111111111111111111111111111111111111111"' "$formula" >/dev/null
 grep -F 'herdr-fwd-linux-aarch64.tar.gz' "$formula" >/dev/null
