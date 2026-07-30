@@ -63,7 +63,6 @@ jobs:
           retention-days: 7
 
   homebrew-preflight:
-    if: ${{ false }}
     name: verify Homebrew publication access
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -82,7 +81,6 @@ jobs:
           fi
 
   homebrew-test:
-    if: ${{ false }}
     name: test Homebrew formula (${{ matrix.os }})
     needs: build
     strategy:
@@ -146,8 +144,7 @@ jobs:
           upload-release-assets: false
       - working-directory: dist
         run: sha256sum -- *.tar.gz *.spdx.json > SHA256SUMS
-      - if: ${{ false }}
-        uses: actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661 # v3
+      - uses: actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661 # v3
         with:
           subject-path: dist/*.tar.gz
       - env:
@@ -160,9 +157,8 @@ jobs:
           --generate-notes
 
   homebrew:
-    if: ${{ false }}
     name: propose Homebrew formula update
-    needs: publish
+    needs: [publish, homebrew-preflight]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:

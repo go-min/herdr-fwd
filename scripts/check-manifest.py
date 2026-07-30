@@ -108,6 +108,37 @@ def main() -> None:
     for artifact in ("SHA256SUMS", "spdx-json", "attest-build-provenance"):
         if artifact not in release:
             fail(f"release workflow is missing {artifact}")
+    if re.search(
+        r"if:\s*\$\{\{\s*false\s*\}\}\n\s+uses: actions/attest-build-provenance@",
+        release,
+    ):
+        fail("release workflow must enable build provenance attestations")
+
+    for job in ("homebrew-preflight", "homebrew-test", "homebrew"):
+        if f"  {job}:" not in release:
+            fail(f"release workflow is missing {job}")
+        if re.search(
+            rf"^  {re.escape(job)}:\n    if:\\s*\\$\\{{\\{{\\s*false\\s*\\}}\\}}",
+            release,
+            re.MULTILINE,
+        ):
+            fail(f"release workflow must enable {job}")
+    if "needs: [publish, homebrew-preflight]" not in release:
+        fail("Homebrew publication must require the tap credential preflight")
+
+    manual_homebrew = ROOT / ".github/workflows/homebrew.yml"
+    if not manual_homebrew.is_file():
+        fail("manual Homebrew publication workflow is required")
+    manual_homebrew_text = manual_homebrew.read_text()
+    for required in (
+        "workflow_dispatch:",
+        "HOMEBREW_TAP_TOKEN",
+        "gh release download",
+        "gh pr create",
+        "ref: ${{ inputs.tag }}",
+    ):
+        if required not in manual_homebrew_text:
+            fail(f"manual Homebrew workflow is missing {required!r}")
 
 
 if __name__ == "__main__":
