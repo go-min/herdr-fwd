@@ -1,0 +1,251 @@
+#!/usr/bin/env python3
+import http.server
+import errno
+import json
+import os
+from pathlib import Path
+import socket
+import socketserver
+import subprocess
+import sys
+import threading
+import time
+
+
+class ReusableTCPServer(socketserver.TCPServer):
+    allow_reuse_address = True
+
+
+FIXTURE_ROOT = Path.home() / ".cache/herdr-fwd/dev-servers"
+NODE_FIXTURES = {
+    "vite": ({"vite": "^5.4.0"}, {"index.html": "<h1>Vite fixture</h1>"}, "vite"),
+    "next": ({"next": "^14.2.0", "react": "^18.3.0", "react-dom": "^18.3.0"}, {"app/layout.js": "export default ({children}) => <html><body>{children}</body></html>", "app/page.js": "export default () => <h1>Next fixture</h1>"}, "next"),
+    "astro": ({"astro": "^4.16.0"}, {"src/pages/index.astro": "<h1>Astro fixture</h1>"}, "astro"),
+    "nuxt": ({"nuxt": "^3.12.0"}, {"app.vue": "<template><h1>Nuxt fixture</h1></template>"}, "nuxt"),
+    "sveltekit": ({"@sveltejs/adapter-auto": "^3.2.0", "@sveltejs/kit": "^2.5.0", "@sveltejs/vite-plugin-svelte": "^3.1.0", "svelte": "^4.2.0", "vite": "^5.4.0"}, {"src/app.html": "<div style=\"display: contents\">%sveltekit.body%</div>", "src/routes/+page.svelte": "<h1>SvelteKit fixture</h1>", "svelte.config.js": "import adapter from '@sveltejs/adapter-auto'; export default { kit: { adapter: adapter() } };", "vite.config.js": "import { sveltekit } from '@sveltejs/kit/vite'; export default { plugins: [sveltekit()] };"}, "vite"),
+    "storybook": ({"storybook": "^8.6.0", "@storybook/html-vite": "^8.6.0", "react": "^18.3.0", "react-dom": "^18.3.0", "vite": "^5.4.0"}, {".storybook/main.js": "export default { framework: '@storybook/html-vite', stories: ['../stories/*.stories.js'] };", "stories/example.stories.js": "export default { title: 'Fixture' }; export const Basic = () => '<button>Storybook fixture</button>';"}, "storybook"),
+}
+
+
+def topology_layout():
+    return [
+        ("Apps", [("Vite", [("vite", 3000)]), ("Frontend", [("astro", 3001), ("sveltekit", 3002)])]),
+        (
+            "Services",
+            [("React", [("next", 4000), ("storybook", 4001)]), ("Vue", [("nuxt", 4002)]), ("Runtimes", [("bun", 4003), ("deno", 4004), ("dual", 4007)])],
+        ),
+        ("Gateways", [("Nginx", [("nginx", 4005)]), ("Caddy", [("caddy", 4006)])]),
+    ]
+
+
+def fixture_dir(name):
+    return FIXTURE_ROOT / name
+
+
+def prepare_fixtures():
+    for name, (dependencies, files, executable) in NODE_FIXTURES.items():
+        root = fixture_dir(name)
+        root.mkdir(parents=True, exist_ok=True)
+        command = "vite dev" if name in ("vite", "sveltekit") else f"{executable} dev"
+        (root / "package.json").write_text(json.dumps({"private": True, "type": "module", "scripts": {"dev": command}, "devDependencies": dependencies}))
+        for path, content in files.items():
+            destination = root / path
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_text(content)
+        subprocess.run(["npm", "install", "--no-audit", "--no-fund", "--legacy-peer-deps"], cwd=root, check=True)
+    static = FIXTURE_ROOT / "static"
+    static.mkdir(parents=True, exist_ok=True)
+    (static / "index.html").write_text("<h1>Gateway fixture</h1>")
+    (FIXTURE_ROOT / "deno.ts").write_text("export default { fetch: () => new Response('Deno fixture') };\n")
+
+
+def server_command(name, port):
+    if name in NODE_FIXTURES:
+        executable = fixture_dir(name) / "node_modules/.bin" / NODE_FIXTURES[name][2]
+        host_flag = "--hostname" if name == "next" else "--host"
+        command = [str(executable), "dev", host_flag, "127.0.0.1", "--port", str(port)]
+        return [*command, "--ci"] if name == "storybook" else command
+    if name == "bun":
+        return [str(Path.home() / ".local/bin/bun"), "--eval", f"Bun.serve({{hostname:'127.0.0.1',port:{port},fetch:()=>new Response('Bun fixture')}})"]
+    if name == "deno":
+        return [str(Path.home() / ".local/bin/deno"), "serve", "--host=127.0.0.1", f"--port={port}", str(FIXTURE_ROOT / "deno.ts")]
+    if name == "caddy":
+        return ["caddy", "file-server", "--listen", f"127.0.0.1:{port}", "--root", str(FIXTURE_ROOT / "static")]
+    if name == "nginx":
+        FIXTURE_ROOT.mkdir(parents=True, exist_ok=True)
+        config = FIXTURE_ROOT / f"nginx-{port}.conf"
+        config.write_text(f"pid {FIXTURE_ROOT / 'nginx.pid'}; events {{}} http {{ access_log off; error_log stderr; server {{ listen 127.0.0.1:{port}; root {FIXTURE_ROOT / 'static'}; }} }}")
+        return ["nginx", "-c", str(config), "-g", "daemon off;"]
+    raise SystemExit(f"error: unknown fixture server: {name}")
+
+
+def herdr_binary(environment=None, is_file=os.path.isfile):
+    environment = os.environ if environment is None else environment
+    explicit = environment.get("HERDR_BIN_PATH")
+    if explicit:
+        return explicit
+    installed = os.path.join(environment.get("HOME", ""), ".local/bin/herdr")
+    return installed if is_file(installed) else "herdr"
+
+
+def herdr_json(*arguments):
+    result = subprocess.run(
+        [herdr_binary(), *arguments],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    return json.loads(result.stdout)
+
+
+def field(value, name):
+    if isinstance(value, dict):
+        if isinstance(value.get(name), str):
+            return value[name]
+        for child in value.values():
+            found = field(child, name)
+            if found:
+                return found
+    elif isinstance(value, list):
+        for child in value:
+            found = field(child, name)
+            if found:
+                return found
+    return None
+
+
+def start_server(pane_id, name, port):
+    subprocess.run(
+        [
+            herdr_binary(),
+            "pane",
+            "run",
+            pane_id,
+            sys.executable,
+            os.path.abspath(__file__),
+            "--server",
+            name,
+            str(port),
+        ],
+        check=True,
+    )
+    wait_for_listeners([port, port + 1] if name == "dual" else [port])
+
+
+def wait_for_listeners(ports, timeout=20):
+    pending = set(ports)
+    deadline = time.monotonic() + timeout
+    while pending and time.monotonic() < deadline:
+        for port in tuple(pending):
+            try:
+                with socket.create_connection(("127.0.0.1", port), timeout=0.2):
+                    pending.remove(port)
+            except OSError:
+                pass
+        if pending:
+            time.sleep(0.1)
+    if pending:
+        raise SystemExit(
+            "error: fixture listeners did not become ready: "
+            + ", ".join(str(port) for port in sorted(pending))
+        )
+
+
+def start_topology():
+    cwd = os.getcwd()
+    for workspace_label, tabs in topology_layout():
+        created = herdr_json("workspace", "create", "--cwd", cwd, "--label", workspace_label, "--no-focus")
+        workspace_id = field(created, "workspace_id")
+        first_pane_id = field(created, "pane_id")
+        if not workspace_id or not first_pane_id:
+            raise SystemExit("error: Herdr did not return a workspace and root pane")
+        for index, (tab_label, servers) in enumerate(tabs):
+            if index == 0:
+                pane_id = first_pane_id
+            else:
+                created = herdr_json("tab", "create", "--workspace", workspace_id, "--cwd", cwd, "--label", tab_label, "--no-focus")
+                pane_id = field(created, "pane_id")
+                if not pane_id:
+                    raise SystemExit("error: Herdr did not return a tab root pane")
+            name, port = servers[0]
+            start_server(pane_id, name, port)
+            for name, port in servers[1:]:
+                split = herdr_json("pane", "split", pane_id, "--direction", "right", "--no-focus")
+                pane_id = field(split, "pane_id")
+                if not pane_id:
+                    raise SystemExit("error: Herdr did not return a split pane")
+                start_server(pane_id, name, port)
+
+
+raw_port = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("PORT", "3000")
+if raw_port == "--self-test":
+    assert herdr_binary({"HOME": "/home/guest"}, lambda _: True) == "/home/guest/.local/bin/herdr"
+    assert herdr_binary({"HERDR_BIN_PATH": "/custom/herdr"}) == "/custom/herdr"
+    assert server_command("vite", 3000)[-2:] == ["--port", "3000"]
+    server = ReusableTCPServer(("127.0.0.1", 0), http.server.SimpleHTTPRequestHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        wait_for_listeners([server.server_address[1]], timeout=1)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+    raise SystemExit(0)
+if raw_port == "--topology":
+    start_topology()
+    raise SystemExit(0)
+if raw_port == "--prepare":
+    prepare_fixtures()
+    raise SystemExit(0)
+if raw_port == "--server":
+    if len(sys.argv) != 4:
+        raise SystemExit("usage: test-dev-server --server NAME PORT")
+    name, server_port = sys.argv[2:]
+    try:
+        server_port = int(server_port)
+    except ValueError:
+        raise SystemExit("error: TCP port must be a number")
+    if not 1 <= server_port <= 65535:
+        raise SystemExit("error: TCP port must be between 1 and 65535")
+    if name == "dual":
+        servers = [ReusableTCPServer(("127.0.0.1", port), http.server.SimpleHTTPRequestHandler) for port in (server_port, server_port + 1)]
+        print(f"Local: http://localhost:{server_port}/ and :{server_port + 1}/", flush=True)
+        for server in servers[1:]:
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+        with servers[0]:
+            servers[0].serve_forever()
+        raise SystemExit(0)
+    command = server_command(name, server_port)
+    os.environ["NUXT_TELEMETRY_DISABLED"] = "1"
+    os.environ["STORYBOOK_DISABLE_TELEMETRY"] = "1"
+    os.chdir(fixture_dir(name) if name in NODE_FIXTURES else FIXTURE_ROOT)
+    os.execvp(command[0], command)
+try:
+    preferred_port = int(raw_port)
+except ValueError:
+    raise SystemExit(f"error: invalid TCP port: {raw_port}")
+
+if not 1 <= preferred_port <= 65535:
+    raise SystemExit("error: TCP port must be between 1 and 65535")
+
+server = None
+for port in range(preferred_port, 65536):
+    try:
+        server = ReusableTCPServer(
+            ("127.0.0.1", port), http.server.SimpleHTTPRequestHandler
+        )
+        break
+    except OSError as error:
+        if error.errno != errno.EADDRINUSE:
+            raise
+
+if server is None:
+    raise SystemExit(f"error: no free TCP port at or above {preferred_port}")
+
+with server:
+    print(f"Local: http://localhost:{port}/", flush=True)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass

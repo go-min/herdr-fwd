@@ -1,0 +1,72 @@
+id = "herdr.fwd"
+name = "Herdr Fwd"
+version = "0.1.4"
+min_herdr_version = "0.7.5"
+description = "Discover localhost dev servers in remote Herdr panes and request local SSH forwards"
+platforms = ["linux", "macos"]
+
+[[build]]
+command = ["./scripts/install-plugin-binary.sh"]
+platforms = ["linux", "macos"]
+
+[[startup]]
+command = ["./target/release/herdr-fwd-plugin", "start"]
+
+[[actions]]
+id = "wake"
+title = "Wake remote port discovery"
+contexts = ["workspace"]
+command = ["./target/release/herdr-fwd-plugin", "start"]
+
+[[actions]]
+id = "open-dashboard-here"
+title = "Open Port Forward Dashboard Here"
+contexts = ["workspace"]
+command = ["./target/release/herdr-fwd-plugin", "open-dashboard-here"]
+
+[[actions]]
+id = "open-dashboard-popup"
+title = "Open Port Forward Popup"
+contexts = ["workspace"]
+command = ["./target/release/herdr-fwd-plugin", "open-dashboard-popup"]
+
+[[actions]]
+id = "enable-sidebar-status"
+title = "Enable Port Status in Sidebar"
+contexts = ["workspace"]
+command = ["./target/release/herdr-fwd-plugin", "enable-sidebar-status"]
+
+[[panes]]
+id = "welcome"
+title = "Welcome to Herdr Fwd"
+placement = "popup"
+width = 76
+height = 22
+command = ["./target/release/herdr-fwd-plugin", "welcome"]
+
+[[panes]]
+id = "dashboard"
+title = "Port Forward Dashboard"
+placement = "split"
+command = ["./target/release/herdr-fwd-plugin", "dashboard-current"]
+
+[[panes]]
+id = "dashboard-popup"
+title = "Port Forward Dashboard"
+placement = "popup"
+width = 96
+height = 32
+command = ["./target/release/herdr-fwd-plugin", "dashboard-current"]
+
+[[events]]
+on = "pane.created"
+command = ["./target/release/herdr-fwd-plugin", "start"]
+[[events]]
+on = "pane.focused"
+command = ["./target/release/herdr-fwd-plugin", "start"]
+[[events]]
+on = "pane.exited"
+command = ["./target/release/herdr-fwd-plugin", "start"]
+[[events]]
+on = "pane.closed"
+command = ["./target/release/herdr-fwd-plugin", "start"]

@@ -1,0 +1,43 @@
+[package]
+name = "herdr-fwd"
+version = "0.1.4"
+edition = "2021"
+description = "Automatic loopback port forwarding for remote Herdr sessions"
+license = "MIT"
+authors = ["gomin"]
+repository = "https://github.com/go-min/herdr-fwd"
+homepage = "https://github.com/go-min/herdr-fwd"
+readme = "README.md"
+keywords = ["herdr", "terminal", "plugin", "ssh"]
+categories = ["command-line-utilities"]
+rust-version = "1.82"
+publish = false
+
+[dependencies]
+ctrlc = { version = "3", features = ["termination"] }
+crossterm = "0.29"
+fs2 = "0.4"
+# Keeps toml_edit's transitive dependency graph compatible with Rust 1.82.
+indexmap = "=2.7.1"
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tiny_http = "0.12"
+toml_edit = { version = "0.22.27", features = ["serde"] }
+
+[lib]
+name = "herdr_fwd"
+path = "src/lib.rs"
+
+[[bin]]
+name = "hfwd"
+path = "src/bin/hfwd.rs"
+
+[[bin]]
+name = "herdr-fwd-plugin"
+path = "src/bin/herdr-fwd-plugin.rs"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = "symbols"
