@@ -18,12 +18,12 @@ ctrlc = { version = "3", features = ["termination"] }
 crossterm = "0.29"
 fs2 = "0.4"
 # Keeps toml_edit's transitive dependency graph compatible with Rust 1.82.
-indexmap = "=2.7.1"
+indexmap = "=2.14.0"
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tiny_http = "0.12"
-toml_edit = { version = "0.22.27", features = ["serde"] }
+toml_edit = { version = "0.25.13", features = ["serde"] }
 
 [lib]
 name = "herdr_fwd"
