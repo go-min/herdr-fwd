@@ -5,7 +5,7 @@ use std::{
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
+        Arc, Condvar, Mutex,
     },
     thread,
     time::{Duration, Instant},
@@ -25,6 +25,7 @@ use crate::local::{
 };
 
 const MAX_BODY_SIZE: u64 = 64 * 1024;
+const MAX_ACTIVE_REQUESTS: usize = 64;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -92,14 +93,15 @@ pub(crate) struct CompanionState<S: Ssh> {
 
 impl<S: Ssh> CompanionState<S> {
     pub(crate) fn persist(&self) -> Result<(), String> {
-        let forwards = self
+        let registry = self
             .registry
             .lock()
-            .map_err(|_| "forward registry lock poisoned".to_string())?
-            .forwards
-            .values()
-            .cloned()
-            .collect();
+            .map_err(|_| "forward registry lock poisoned".to_string())?;
+        self.persist_locked(&registry)
+    }
+
+    fn persist_locked(&self, registry: &Registry<S>) -> Result<(), String> {
+        let forwards = registry.forwards.values().cloned().collect();
         write_private_json(
             &self.state_path,
             &LocalSessionState {
@@ -113,11 +115,8 @@ impl<S: Ssh> CompanionState<S> {
         )
     }
 
-    pub(crate) fn persist_manual(&self) -> Result<(), String> {
-        let forwards = self
-            .registry
-            .lock()
-            .map_err(|_| "forward registry lock poisoned".to_string())?
+    fn persist_manual_locked(&self, registry: &Registry<S>) -> Result<(), String> {
+        let forwards = registry
             .forwards
             .values()
             .filter(|forward| !forward.automatic)
@@ -169,11 +168,17 @@ impl<S: Ssh> CompanionState<S> {
         Ok(())
     }
 
-    pub(crate) fn persist_paused_automatic(&self) -> Result<(), String> {
-        let forwards = self
+    #[cfg(test)]
+    fn persist_paused_automatic(&self) -> Result<(), String> {
+        let registry = self
             .registry
             .lock()
-            .map_err(|_| "forward registry lock poisoned".to_string())?
+            .map_err(|_| "forward registry lock poisoned".to_string())?;
+        self.persist_paused_automatic_locked(&registry)
+    }
+
+    fn persist_paused_automatic_locked(&self, registry: &Registry<S>) -> Result<(), String> {
+        let forwards = registry
             .forwards
             .values()
             .filter(|forward| forward.automatic && !forward.enabled)
@@ -184,13 +189,44 @@ impl<S: Ssh> CompanionState<S> {
         write_private_json(&self.paused_path, &forwards)
     }
 
-    fn persist_forward_state(&self) -> Result<(), String> {
-        self.persist_manual()
+    fn persist_forward_state_locked(&self, registry: &Registry<S>) -> Result<(), String> {
+        self.persist_manual_locked(registry)
             .map_err(|error| format!("manual forwards: {error}"))?;
-        self.persist_paused_automatic()
+        self.persist_paused_automatic_locked(registry)
             .map_err(|error| format!("paused automatic forwards: {error}"))?;
-        self.persist()
+        self.persist_locked(registry)
             .map_err(|error| format!("session state: {error}"))
+    }
+
+    fn mutate_and_persist<T>(
+        &self,
+        persist_on_mutation_error: bool,
+        mutate: impl FnOnce(&mut Registry<S>) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let mut registry = self
+            .registry
+            .lock()
+            .map_err(|_| "registry unavailable".to_string())?;
+        let snapshot = registry.snapshot();
+        let mutation = mutate(&mut registry);
+        if mutation.is_err() && !persist_on_mutation_error {
+            return mutation;
+        }
+        if let Err(persist_error) = self.persist_forward_state_locked(&registry) {
+            let rollback = registry.restore(snapshot);
+            let restore_persistence = self.persist_forward_state_locked(&registry);
+            let mut error = format!("failed to persist forwarding state: {persist_error}");
+            if let Err(rollback_error) = rollback {
+                error.push_str(&format!("; tunnel rollback failed: {rollback_error}"));
+            }
+            if let Err(restore_error) = restore_persistence {
+                error.push_str(&format!(
+                    "; rollback state persistence failed: {restore_error}"
+                ));
+            }
+            return Err(error);
+        }
+        mutation
     }
 
     pub(crate) fn paused_automatic_ports(&self) -> Result<HashSet<u16>, String> {
@@ -245,17 +281,85 @@ fn persistent_key_component(value: &str) -> String {
         .collect()
 }
 
+pub(crate) struct CompanionServer {
+    accept_thread: thread::JoinHandle<()>,
+    requests: Arc<ActiveRequests>,
+}
+
+impl CompanionServer {
+    pub(crate) fn join(self) -> thread::Result<()> {
+        let result = self.accept_thread.join();
+        self.requests.wait_until_idle();
+        result
+    }
+}
+
+#[derive(Default)]
+struct ActiveRequests {
+    count: Mutex<usize>,
+    idle: Condvar,
+}
+
+impl ActiveRequests {
+    fn begin(self: &Arc<Self>) -> Option<ActiveRequest> {
+        let mut count = self.count.lock().ok()?;
+        if *count >= MAX_ACTIVE_REQUESTS {
+            return None;
+        }
+        *count += 1;
+        Some(ActiveRequest {
+            requests: Arc::clone(self),
+        })
+    }
+
+    fn wait_until_idle(&self) {
+        let Ok(mut count) = self.count.lock() else {
+            return;
+        };
+        while *count != 0 {
+            let Ok(next) = self.idle.wait(count) else {
+                return;
+            };
+            count = next;
+        }
+    }
+}
+
+struct ActiveRequest {
+    requests: Arc<ActiveRequests>,
+}
+
+impl Drop for ActiveRequest {
+    fn drop(&mut self) {
+        if let Ok(mut count) = self.requests.count.lock() {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                self.requests.idle.notify_all();
+            }
+        }
+    }
+}
+
 pub(crate) fn spawn_server(
     server: Server,
     state: Arc<CompanionState<impl Ssh>>,
     stop: Arc<AtomicBool>,
-) -> thread::JoinHandle<()> {
-    thread::spawn(move || {
+) -> CompanionServer {
+    let requests = Arc::new(ActiveRequests::default());
+    let request_tracker = Arc::clone(&requests);
+    let accept_thread = thread::spawn(move || {
         while !stop.load(Ordering::SeqCst) {
             match server.recv_timeout(Duration::from_millis(250)) {
                 Ok(Some(request)) => {
                     let state = Arc::clone(&state);
-                    thread::spawn(move || handle_request(request, &state));
+                    let Some(active_request) = request_tracker.begin() else {
+                        respond_error(request, 503, "companion is busy");
+                        continue;
+                    };
+                    thread::spawn(move || {
+                        let _active_request = active_request;
+                        handle_request(request, &state);
+                    });
                 }
                 Ok(None) => {}
                 Err(error) => {
@@ -264,7 +368,11 @@ pub(crate) fn spawn_server(
                 }
             }
         }
-    })
+    });
+    CompanionServer {
+        accept_thread,
+        requests,
+    }
 }
 
 fn handle_request(mut request: Request, state: &Arc<CompanionState<impl Ssh>>) {
@@ -328,33 +436,24 @@ fn handle_request(mut request: Request, state: &Arc<CompanionState<impl Ssh>>) {
                         return;
                     }
                 };
-            let result = state
-                .registry
-                .lock()
-                .map_err(|_| "registry unavailable".to_string())
-                .and_then(|mut registry| {
-                    if start_paused {
-                        registry.create_paused(&payload)
-                    } else {
-                        registry.create(&payload)
-                    }
-                });
+            let result = state.mutate_and_persist(false, |registry| {
+                if start_paused {
+                    registry.create_paused(&payload)
+                } else {
+                    registry.create(&payload)
+                }
+            });
             match result {
                 Ok((forward, created)) => {
-                    if let Err(error) = state.persist_forward_state() {
-                        respond_error(
-                            request,
-                            500,
-                            &format!("failed to persist forwarding state: {error}"),
-                        );
-                        return;
-                    }
                     if created && forward.enabled && state.open_new {
                         if let Err(error) = open_browser(&forward.local_url()) {
                             debug_log(&format!("failed to open browser: {error}"));
                         }
                     }
                     respond_json(request, if created { 201 } else { 200 }, &forward);
+                }
+                Err(error) if error.starts_with("failed to persist forwarding state:") => {
+                    respond_error(request, 500, &error)
                 }
                 Err(error) => respond_error(request, 422, &error),
             }
@@ -365,21 +464,13 @@ fn handle_request(mut request: Request, state: &Arc<CompanionState<impl Ssh>>) {
                 respond_error(request, 404, "forward not found");
                 return;
             }
-            let result = state
-                .registry
-                .lock()
-                .map_err(|_| "registry unavailable".to_string())
-                .and_then(|mut registry| registry.remove(id));
+            let result = state.mutate_and_persist(false, |registry| registry.remove(id));
             match result {
-                Ok(Some(forward)) => match state.persist_forward_state() {
-                    Ok(()) => respond_json(request, 200, &forward),
-                    Err(error) => respond_error(
-                        request,
-                        500,
-                        &format!("failed to persist forwarding state: {error}"),
-                    ),
-                },
+                Ok(Some(forward)) => respond_json(request, 200, &forward),
                 Ok(None) => respond_error(request, 404, "forward not found"),
+                Err(error) if error.starts_with("failed to persist forwarding state:") => {
+                    respond_error(request, 500, &error)
+                }
                 Err(error) => respond_error(request, 502, &error),
             }
         }
@@ -419,20 +510,13 @@ fn handle_request(mut request: Request, state: &Arc<CompanionState<impl Ssh>>) {
                 }
             };
             let result = state
-                .registry
-                .lock()
-                .map_err(|_| "registry unavailable".to_string())
-                .and_then(|mut registry| registry.set_enabled(id, payload.enabled));
+                .mutate_and_persist(false, |registry| registry.set_enabled(id, payload.enabled));
             match result {
-                Ok(Some(forward)) => match state.persist_forward_state() {
-                    Ok(()) => respond_json(request, 200, &forward),
-                    Err(error) => respond_error(
-                        request,
-                        500,
-                        &format!("failed to persist forwarding state: {error}"),
-                    ),
-                },
+                Ok(Some(forward)) => respond_json(request, 200, &forward),
                 Ok(None) => respond_error(request, 404, "forward not found"),
+                Err(error) if error.starts_with("failed to persist forwarding state:") => {
+                    respond_error(request, 500, &error)
+                }
                 Err(error) => respond_error(request, 502, &error),
             }
         }
@@ -454,32 +538,16 @@ fn handle_request(mut request: Request, state: &Arc<CompanionState<impl Ssh>>) {
                     return;
                 }
             };
-            let result = state
-                .registry
-                .lock()
-                .map_err(|_| "registry unavailable".to_string())
-                .and_then(|mut registry| registry.set_local_port(id, payload.local_port));
+            let result = state.mutate_and_persist(true, |registry| {
+                registry.set_local_port(id, payload.local_port)
+            });
             match result {
-                Ok(Some(forward)) => match state.persist_forward_state() {
-                    Ok(()) => respond_json(request, 200, &forward),
-                    Err(error) => respond_error(
-                        request,
-                        500,
-                        &format!("failed to persist forwarding state: {error}"),
-                    ),
-                },
+                Ok(Some(forward)) => respond_json(request, 200, &forward),
                 Ok(None) => respond_error(request, 404, "forward not found"),
-                Err(error) => {
-                    // A failed remap can still transition the entry to a safe
-                    // disabled state when rollback fails.
-                    let error = match state.persist_forward_state() {
-                        Ok(()) => error,
-                        Err(persist_error) => {
-                            format!("{error}; failed to persist forwarding state: {persist_error}")
-                        }
-                    };
-                    respond_error(request, 422, &error);
+                Err(error) if error.starts_with("failed to persist forwarding state:") => {
+                    respond_error(request, 500, &error)
                 }
+                Err(error) => respond_error(request, 422, &error),
             }
         }
         _ => respond_error(request, 404, "not found"),
@@ -729,13 +797,11 @@ mod companion_tests {
     }
 
     #[test]
-    fn reports_manual_forward_persistence_failures_to_the_client() {
+    fn serializes_concurrent_mutations_and_publishes_valid_session_state() {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let address = listener.local_addr().unwrap();
         let server = Server::from_listener(listener, None).unwrap();
-        let temporary = RuntimeDirectory::create("herdr-rpf-persist-error-test-").unwrap();
-        let manual_path = temporary.path().join("manual-state");
-        std::fs::create_dir(&manual_path).unwrap();
+        let temporary = RuntimeDirectory::create("herdr-fwd-concurrent-state-test-").unwrap();
         let token = "ab".repeat(32);
         let state = Arc::new(CompanionState {
             session_id: "0123456789abcdef01234567".into(),
@@ -745,6 +811,67 @@ mod companion_tests {
             wrapper_pid: std::process::id(),
             registry: Mutex::new(Registry::new(FakeSsh::default())),
             state_path: temporary.path().join("session.json"),
+            manual_path: temporary.path().join("manual.json"),
+            paused_path: temporary.path().join("paused.json"),
+            last_heartbeat: Mutex::new(None),
+            open_new: false,
+        });
+        state.registry.lock().unwrap().port_available = |_| true;
+        let stop = Arc::new(AtomicBool::new(false));
+        let server = spawn_server(server, state, stop.clone());
+        let base = format!("http://{address}");
+        let requests = (0..12)
+            .map(|offset| {
+                let base = base.clone();
+                let token = token.clone();
+                std::thread::spawn(move || {
+                    let port = 4_200 + offset;
+                    let payload = serde_json::json!({
+                        "remotePort": port,
+                        "preferredLocalPort": port,
+                        "remoteHost": "127.0.0.1",
+                        "paneId": format!("w1:p{offset}"),
+                        "process": "Vite",
+                        "detectedUrl": format!("http://localhost:{port}/"),
+                        "automatic": true
+                    })
+                    .to_string();
+                    http_request(&base, &token, "POST", "/v1/forwards", Some(&payload)).unwrap()
+                })
+            })
+            .collect::<Vec<_>>();
+        for request in requests {
+            assert!(request.join().unwrap().starts_with("HTTP/1.1 201"));
+        }
+        let persisted = serde_json::from_slice::<LocalSessionState>(
+            &std::fs::read(temporary.path().join("session.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(persisted.forwards.len(), 12);
+
+        stop.store(true, Ordering::SeqCst);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn reports_manual_forward_persistence_failures_to_the_client() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = Server::from_listener(listener, None).unwrap();
+        let temporary = RuntimeDirectory::create("herdr-rpf-persist-error-test-").unwrap();
+        let manual_path = temporary.path().join("manual-state");
+        std::fs::create_dir(&manual_path).unwrap();
+        let token = "ab".repeat(32);
+        let ssh = FakeSsh::default();
+        let calls = ssh.calls.clone();
+        let state = Arc::new(CompanionState {
+            session_id: "0123456789abcdef01234567".into(),
+            target: "workbox".into(),
+            companion_url: format!("http://{address}"),
+            token: token.clone(),
+            wrapper_pid: std::process::id(),
+            registry: Mutex::new(Registry::new(ssh)),
+            state_path: temporary.path().join("session.json"),
             manual_path,
             paused_path: temporary.path().join("paused.json"),
             last_heartbeat: Mutex::new(None),
@@ -752,7 +879,7 @@ mod companion_tests {
         });
         state.registry.lock().unwrap().port_available = |_| true;
         let stop = Arc::new(AtomicBool::new(false));
-        let thread = spawn_server(server, state, stop.clone());
+        let thread = spawn_server(server, state.clone(), stop.clone());
         let request = serde_json::json!({
             "remotePort": 4173,
             "preferredLocalPort": 4173,
@@ -774,6 +901,11 @@ mod companion_tests {
 
         assert!(response.starts_with("HTTP/1.1 500"));
         assert!(response.contains("failed to persist forwarding state"));
+        assert!(state.registry.lock().unwrap().forwards.is_empty());
+        assert_eq!(
+            *calls.lock().unwrap(),
+            ["forward:4173:127.0.0.1:4173", "cancel:4173:127.0.0.1:4173"]
+        );
         stop.store(true, Ordering::SeqCst);
         thread.join().unwrap();
     }

@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::detect::find_urls;
 
-pub const PROTOCOL_VERSION: u16 = 1;
+pub const PROTOCOL_VERSION: u16 = 2;
 pub const DEFAULT_PROCESS_TREE_DEPTH: u8 = 2;
 pub const MAX_PROCESS_TREE_DEPTH: u8 = 8;
 
@@ -61,6 +61,7 @@ impl ForwardRequest {
 pub struct RemoteSessionConfig {
     pub protocol_version: u16,
     pub session_id: String,
+    pub herdr_session: String,
     pub token: String,
     pub rpc_url: String,
     pub auto_detect: bool,
@@ -80,6 +81,7 @@ impl RemoteSessionConfig {
         {
             return Err("sessionId must be 16..=64 hexadecimal characters".into());
         }
+        validate_herdr_session(&self.herdr_session)?;
         if self.token.len() != 64 || !self.token.bytes().all(|byte| byte.is_ascii_hexdigit()) {
             return Err("session token must be a 256-bit hexadecimal value".into());
         }
@@ -97,9 +99,39 @@ impl RemoteSessionConfig {
     }
 }
 
+pub fn herdr_session_storage_key(session: &str) -> Result<String, String> {
+    validate_herdr_session(session)?;
+    if session == "default" {
+        return Ok("default".into());
+    }
+    Ok(format!(
+        "session-{}",
+        session
+            .as_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    ))
+}
+
+fn validate_herdr_session(session: &str) -> Result<(), String> {
+    if session.is_empty()
+        || session.len() > 64
+        || session
+            .chars()
+            .any(|character| character.is_control() || matches!(character, '/' | '\\'))
+    {
+        return Err(
+            "herdrSession must be 1..=64 bytes without control characters or path separators"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ForwardRequest, RemoteSessionConfig, PROTOCOL_VERSION};
+    use super::{herdr_session_storage_key, ForwardRequest, RemoteSessionConfig, PROTOCOL_VERSION};
 
     fn request() -> ForwardRequest {
         ForwardRequest {
@@ -136,6 +168,7 @@ mod tests {
         let mut config = RemoteSessionConfig {
             protocol_version: PROTOCOL_VERSION,
             session_id: "0123456789abcdef01234567".into(),
+            herdr_session: "default".into(),
             token: "ab".repeat(32),
             rpc_url: "http://127.0.0.1:23000".into(),
             auto_detect: true,
@@ -148,5 +181,41 @@ mod tests {
         assert!(config.validate().is_err());
         config.rpc_url = "http://127.0.0.2:23000".into();
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn requires_the_remote_herdr_session_in_the_wire_protocol() {
+        let valid = serde_json::json!({
+            "protocolVersion": PROTOCOL_VERSION,
+            "sessionId": "0123456789abcdef01234567",
+            "token": "ab".repeat(32),
+            "rpcUrl": "http://127.0.0.1:23000",
+            "autoDetect": true,
+            "herdrSession": "review"
+        });
+        assert!(serde_json::from_value::<RemoteSessionConfig>(valid).is_ok());
+
+        let missing_scope = serde_json::json!({
+            "protocolVersion": PROTOCOL_VERSION,
+            "sessionId": "0123456789abcdef01234567",
+            "token": "ab".repeat(32),
+            "rpcUrl": "http://127.0.0.1:23000",
+            "autoDetect": true
+        });
+        assert!(serde_json::from_value::<RemoteSessionConfig>(missing_scope).is_err());
+    }
+
+    #[test]
+    fn maps_named_herdr_sessions_to_safe_distinct_storage_components() {
+        assert_eq!(herdr_session_storage_key("default").unwrap(), "default");
+        assert_eq!(
+            herdr_session_storage_key("review").unwrap(),
+            "session-726576696577"
+        );
+        assert_ne!(
+            herdr_session_storage_key("review").unwrap(),
+            herdr_session_storage_key("preview").unwrap()
+        );
+        assert!(herdr_session_storage_key("../review").is_err());
     }
 }

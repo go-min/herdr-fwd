@@ -98,8 +98,9 @@ scripts-check:
 	PYTHONPYCACHEPREFIX="$${TMPDIR:-/tmp}/herdr-fwd-pycache" python3 -m py_compile \
 		scripts/check-manifest.py scripts/test-dev-server
 	scripts/test-dev-server --self-test
+	shellcheck install.sh uninstall.sh scripts/*.sh .github/assets/demo/*.sh .github/assets/demo/herdr
 
-ci: fmt-check lint markdown-check test build manifest-check scripts-check package-smoke ## Core|Run every local CI check
+ci: fmt-check lint markdown-check deps-check test build manifest-check scripts-check package-smoke ## Core|Run every local CI check
 
 package: build
 	scripts/package-release.sh "$$(rustc -vV | sed -n 's/^host: //p')"
@@ -108,7 +109,7 @@ package-smoke: package
 	scripts/test-release-package.sh
 
 release-check: ## Release|Validate release metadata with VERSION_TAG=vMAJOR.MINOR.PATCH
-	scripts/check-release.sh "$${VERSION_TAG:?set VERSION_TAG, for example v0.1.0}"
+	scripts/check-release.sh "$${VERSION_TAG:?set VERSION_TAG, for example vX.Y.Z}"
 
 install: ## Install|Build and install hfwd into ~/.local/bin
 	./install.sh --from-source
@@ -119,8 +120,7 @@ uninstall: ## Install|Remove hfwd from ~/.local/bin
 run: build ## Remote development|Build, deploy, and attach to TARGET
 	$(RELEASE_BIN) $(TARGET) $(ARGS)
 
-attach: build ## Remote development|Attach to TARGET without syncing the plugin
-	$(RELEASE_BIN) $(TARGET) $(ARGS)
+attach: run ## Remote development|Alias for the production attach flow
 
 serve: ## Remote development|Start fixtures; set PORT for one server
 	scripts/test-dev-server "$(if $(PORT),$(PORT),--topology)"

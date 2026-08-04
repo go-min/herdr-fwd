@@ -9,19 +9,22 @@ dashboard—without manually maintaining `ssh -L` arguments.
   <source media="(prefers-color-scheme: dark)" srcset=".github/assets/demo/overview-dark.gif">
   <source media="(prefers-color-scheme: light)" srcset=".github/assets/demo/overview-light.gif">
   <img
-    alt="A remote Herdr session running Next.js, followed by the Port Forward dashboard for its loopback listener"
+    alt="Remote Herdr session with three detected servers and the Port Forward dashboard overlay"
     src=".github/assets/demo/overview-light.gif">
 </picture>
 
-The overview follows the real remote flow: a Next.js server runs in a remote
-Herdr pane, `hfwd` attaches through SSH, and the plugin opens its dashboard for
-that discovered loopback listener.
+The overview follows the real remote flow: Storybook, Vite, and Next.js run in
+separate panes of a clean named Herdr session, `hfwd` attaches through SSH, and
+the plugin discovers their loopback listeners before opening the live dashboard
+overlay. The recording restores the prior Herdr configuration and deletes the
+demo session afterward.
 
 ## Requirements
 
 - Herdr 0.8.x on every machine that runs the plugin;
 - macOS or Linux;
-- `git`, `curl`, `tar`, `lsof`, and `sha256sum` or `shasum` on the plugin host;
+- `ps` plus `lsof` on macOS, or `ps` plus `lsof`/`ss` on Linux;
+- `git`, `curl`, `tar`, and `sha256sum` or `shasum` for direct plugin install;
 - Rust and Cargo for source development only; released plugin installation uses verified archives;
 - OpenSSH and a working SSH target for outgoing remote connections; and
 - an SSH agent or keychain when using a passphrase-protected key.
@@ -92,10 +95,11 @@ When `hfwd` installs the plugin automatically on a remote machine, the popup
 is suppressed for that remote session. A later local run explains how the
 plugin arrived and also offers a quick uninstall action. After the popup is
 closed normally, it is not shown again. This choice is stored in
-`~/.config/herdr-fwd/config.toml`. Installation writes `onboarding = true`.
-The plugin checkout records whether the wrapper installed it during a remote
-connection, and that durable install metadata selects the remote-origin popup.
-After completion only `onboarding` becomes `false`.
+`~/.config/herdr-fwd/config.toml`. A new configuration defaults to
+`onboarding = true`; reinstall and update preserve the user's existing value.
+Separate state under `~/.local/state/herdr-fwd/plugin-origin.toml` records only
+an installation first created by `hfwd` on a remote host. That metadata selects
+the remote-origin popup only while its recorded root matches the running plugin.
 
 ## Install hfwd
 
@@ -268,6 +272,10 @@ Remove the plugin from the current machine with:
 ```bash
 herdr plugin uninstall herdr.fwd
 ```
+
+For a source-linked development checkout, use `herdr plugin unlink herdr.fwd`
+instead. `hfwd remote uninstall` selects the correct operation automatically
+for its managed fallback bundle and clears its provenance state.
 
 The welcome popup also provides this action when the plugin was installed by
 `hfwd`. See [installation and operations](docs/operations.md) for script-based

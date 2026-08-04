@@ -42,9 +42,9 @@ the local companion to open the corresponding loopback URL. The dashboard can
 pause/resume entries, retarget a mapping's local port, and create manual
 mappings, but the companion still owns validation and SSH execution.
 Local-port changes use cancel/forward with rollback to the original mapping on
-failure. Dashboard surfaces use a fixed ANSI color palette, white-on-dark-gray
-selection, and dim/bold attributes; exact shades follow the terminal palette
-and no private theme files are parsed. The automatic dashboard is session-owned
+failure. Dashboard surfaces select one semantic light or dark ANSI palette from
+the public Herdr theme name, with `COLORFGBG` as a terminal fallback. Selection
+uses background contrast without changing the foreground. The automatic dashboard is session-owned
 and remains available through an empty registry. Additional copies use the
 declared plugin pane entrypoint or the context-aware action that starts the
 dashboard in `HERDR_PANE_ID`. `After forwarding` is a per-user preference that
@@ -52,8 +52,8 @@ defaults to `SPACE` and can also select `POPUP` or `NOTHING`. All copies exit,
 and the automatic workspace closes, when the remote-forward session disappears.
 
 The wrapper writes a `0600` session file under the remote user's
-`~/.cache/herdr-fwd/`; it contains only an ephemeral RPC URL
-and cryptographically random token. The token is never passed in process argv.
+`~/.cache/herdr-fwd/sessions/<herdr-session>/`; it contains the Herdr session
+identity plus an ephemeral RPC URL and cryptographically random token. The token is never passed in process argv.
 The file is removed on shutdown. The companion validates the token,
 allows only loopback remote hosts and TCP ports, binds only to loopback, and
 deduplicates by remote host/port.
@@ -67,15 +67,18 @@ failure never deletes that state while its owner is alive; unreachable state
 is pruned only after the owner has exited.
 
 Manual mappings and paused automatic ports are persisted separately under the
-local user's `~/.config/herdr-fwd/`, keyed by the resolved remote hostname. They
-survive reconnects to the same machine without being shared across different
-hosts. Ephemeral session tokens and active-forward state remain session-scoped.
+local user's `~/.config/herdr-fwd/`, keyed by both the resolved remote hostname
+and Herdr session. They survive reconnects to the same target session without
+being shared across hosts or named sessions. Ephemeral tokens and active state
+remain attach-scoped.
 
-The remote watcher holds a per-user file lock, subscribes to pane updates and
+The remote watcher holds a lock per Herdr socket/session, subscribes to pane updates and
 lifecycle events with a 15-second reconciliation fallback, and associates each
-`lsof` listener with its foreground process. One process may therefore produce
-multiple forwards. It sends a two-second heartbeat and removes stale sessions
-after three failed RPC checks. The local companion expires its lease after ten
+batched `lsof` listener with its foreground process, merging Linux `ss` results
+when available. One process may therefore produce multiple forwards. An
+independent worker sends a two-second heartbeat; only repeated heartbeat
+failures remove a stale session, so slow discovery cannot expire a healthy
+attach. The local companion expires its lease after ten
 seconds, terminates the attach, retries forward cleanup, closes its owned SSH
 master, and removes local runtime state. The SSH master remains an owned child
 process rather than a daemonized `ssh -f`; the wrapper handles SIGINT, SIGTERM,
@@ -94,11 +97,14 @@ installs or updates it only when needed. Its explicit
 `remote install/update/status/uninstall` commands run only fixed Herdr plugin
 commands over normal SSH: the API never accepts a repository name, plugin id,
 or remote shell fragment from the caller. Managed installs use Herdr's public
-GitHub installation flow pinned to the wrapper's exact version tag. The
-manifest build hook downloads a native release archive, verifies `SHA256SUMS`,
-and installs only the plugin binary; production hosts do not need a Rust
-toolchain. Development checkouts continue to use `plugin link` and local Cargo
-builds.
+GitHub installation flow pinned to the wrapper's exact version tag. If that
+exact release is unreachable remotely, the local wrapper detects the remote
+OS/architecture, downloads and verifies the corresponding archive and
+`SHA256SUMS`, and atomically activates a minimal remote bundle. A verified,
+versioned local cache is used only when GitHub is unavailable locally too.
+Integrity or missing-release errors fail closed and never consume an old cache.
+Production hosts do not need a Rust toolchain. Development checkouts continue
+to use `plugin link` and local Cargo builds.
 Update and uninstall refuse to run while a remote-forward session file exists,
 preventing replacement of the watcher that currently owns lifecycle cleanup.
 
@@ -107,7 +113,7 @@ For repeatable manual testing, the remote host is a Lima Linux VM named
 `lima-herdr-test`; setup and the end-to-end scenario are documented in
 [`docs/testing.md`](testing.md).
 
-The RPC contract carries an explicit protocol version and rejects incompatible
-session files. Requests, responses, metadata fields, and the registry are
+The RPC contract carries an explicit protocol version and Herdr session scope,
+and rejects incompatible or cross-session files. Requests, responses, metadata fields, and the registry are
 bounded. Untrusted process labels and errors are stripped of terminal control
 sequences before dashboard rendering.

@@ -82,11 +82,11 @@ provision() {
     esac
     if ! herdr --version 2>/dev/null | grep -Fx \"herdr \$herdr_version\" >/dev/null; then
       herdr_download=\$(mktemp)
-      trap 'rm -f "\$herdr_download"' EXIT HUP INT TERM
+      trap 'rm -f \"\$herdr_download\"' EXIT HUP INT TERM
       curl -fsSL \"https://github.com/herdrdev/herdr/releases/download/v\$herdr_version/\$herdr_asset\" -o \"\$herdr_download\"
       printf '%s  %s\\n' \"\$herdr_sha256\" \"\$herdr_download\" | sha256sum -c -
       install -m 755 \"\$herdr_download\" \"\$HOME/.local/bin/herdr\"
-      rm -f "\$herdr_download"
+      rm -f \"\$herdr_download\"
       trap - EXIT HUP INT TERM
     fi
     cd '$guest_home'

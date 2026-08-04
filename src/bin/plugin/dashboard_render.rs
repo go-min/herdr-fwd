@@ -22,6 +22,7 @@ pub(crate) fn render_dashboard(
     forwards: &[Forward],
     locations: &HashMap<String, PaneLocation>,
     state: &DashboardState,
+    palette: DashboardPalette,
 ) -> Result<(), String> {
     let (width, height) = terminal::size().unwrap_or((100, 30));
     let mut stdout = std::io::stdout();
@@ -66,7 +67,6 @@ pub(crate) fn render_dashboard(
         .map_err(|error| error.to_string())?;
     } else {
         let lines = tree_lines(forwards, locations);
-        let palette = DashboardPalette::from_environment();
         let visible_lines = height.saturating_sub(5) as usize;
         let selected_line = lines
             .iter()
@@ -336,6 +336,16 @@ fn shortcut_text(shortcuts: &[DashboardShortcut], compact: bool) -> String {
 struct TreeLine {
     text: String,
     forward_index: Option<usize>,
+    kind: TreeLineKind,
+}
+
+#[derive(Clone, Copy)]
+enum TreeLineKind {
+    Blank,
+    ManualHeader,
+    Section,
+    Branch,
+    Forward,
 }
 
 struct LocationInfo<'a> {
@@ -360,11 +370,13 @@ fn tree_lines(forwards: &[Forward], locations: &HashMap<String, PaneLocation>) -
                     lines.push(TreeLine {
                         text: String::new(),
                         forward_index: None,
+                        kind: TreeLineKind::Blank,
                     });
                 }
                 lines.push(TreeLine {
                     text: "  󰖟 MANUAL FORWARDS".into(),
                     forward_index: None,
+                    kind: TreeLineKind::ManualHeader,
                 });
                 manual_section = true;
             }
@@ -388,10 +400,12 @@ fn tree_lines(forwards: &[Forward], locations: &HashMap<String, PaneLocation>) -
                     tunnel = tunnel_status(forward),
                 ),
                 forward_index: Some(index),
+                kind: TreeLineKind::Forward,
             });
             lines.push(TreeLine {
                 text: format!("{continuation}tunnel {}", tunnel_time(forward)),
                 forward_index: Some(index),
+                kind: TreeLineKind::Forward,
             });
             continue;
         }
@@ -409,6 +423,7 @@ fn tree_lines(forwards: &[Forward], locations: &HashMap<String, PaneLocation>) -
             lines.push(TreeLine {
                 text: format!("  󰉋 {workspace}"),
                 forward_index: None,
+                kind: TreeLineKind::Section,
             });
             previous.0 = workspace_id.into();
             previous.1.clear();
@@ -430,6 +445,7 @@ fn tree_lines(forwards: &[Forward], locations: &HashMap<String, PaneLocation>) -
                     tab_icon()
                 ),
                 forward_index: None,
+                kind: TreeLineKind::Branch,
             });
             previous.1 = tab_id.into();
             previous.2.clear();
@@ -466,6 +482,7 @@ fn tree_lines(forwards: &[Forward], locations: &HashMap<String, PaneLocation>) -
                     pane_metadata(forward),
                 ),
                 forward_index: None,
+                kind: TreeLineKind::Branch,
             });
             previous.2 = pane_id.into();
         }
@@ -481,6 +498,7 @@ fn tree_lines(forwards: &[Forward], locations: &HashMap<String, PaneLocation>) -
                 tunnel_status(forward),
             ),
             forward_index: Some(index),
+            kind: TreeLineKind::Forward,
         });
         lines.push(TreeLine {
             text: format!(
@@ -493,6 +511,7 @@ fn tree_lines(forwards: &[Forward], locations: &HashMap<String, PaneLocation>) -
                 tunnel_time(forward),
             ),
             forward_index: Some(index),
+            kind: TreeLineKind::Forward,
         });
     }
     lines
@@ -580,51 +599,9 @@ fn pane_metadata(forward: &Forward) -> String {
 }
 
 fn process_icon(process: &str) -> &'static str {
-    let process = process.to_ascii_lowercase();
-    const DEDICATED_TOOL_ICONS: &[(&str, &str)] = &[
-        ("storybook", ""),
-        ("vite", ""),
-        ("next", ""),
-        ("astro", ""),
-        ("nuxt", ""),
-        ("vue", ""),
-        ("svelte", ""),
-        ("angular", ""),
-        ("react", ""),
-        ("webpack", ""),
-        ("express", ""),
-        ("fastify", ""),
-        ("nest", ""),
-        ("node", ""),
-        ("django", ""),
-        ("fastapi", ""),
-        ("flask", ""),
-        ("python", ""),
-        ("rails", ""),
-        ("ruby", ""),
-        ("cargo", ""),
-        ("rust", ""),
-        ("spring", ""),
-        ("java", ""),
-        ("laravel", ""),
-        ("php", ""),
-        ("docker", ""),
-        ("nginx", ""),
-        ("apache", ""),
-        ("bun", ""),
-        ("deno", ""),
-    ];
-
-    if let Some((_, icon)) = DEDICATED_TOOL_ICONS
-        .iter()
-        .find(|(name, _)| process.contains(name))
-    {
-        icon
-    } else if process == "go" || process.contains("golang") || process.starts_with("go ") {
-        ""
-    } else {
-        "󰒋"
-    }
+    herdr_fwd::tools::tool_for_text(process)
+        .and_then(|tool| tool.icon)
+        .unwrap_or("󰒋")
 }
 
 pub(crate) fn sort_for_display(
@@ -814,7 +791,7 @@ fn tree_line_color(line: &TreeLine, _selected: bool, forwards: &[Forward]) -> Co
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct DashboardPalette {
+pub(crate) struct DashboardPalette {
     active: Color,
     paused: Color,
     manual: Color,
@@ -826,7 +803,7 @@ struct DashboardPalette {
 }
 
 impl DashboardPalette {
-    fn from_environment() -> Self {
+    pub(crate) fn from_environment() -> Self {
         let theme_name = configured_theme_name().ok().flatten();
         Self::from_theme_and_colorfgbg(
             theme_name.as_deref(),
@@ -862,7 +839,7 @@ impl DashboardPalette {
             manual: Color::DarkMagenta,
             section: Color::DarkCyan,
             tree: Color::DarkBlue,
-            selection: Color::DarkGrey,
+            selection: Color::AnsiValue(252),
             dim_metadata: false,
             dim_paused: false,
         }
@@ -876,17 +853,11 @@ impl DashboardPalette {
                 self.paused
             };
         }
-        if line.text.contains("MANUAL FORWARDS") {
-            self.manual
-        } else if !line.text.trim().is_empty()
-            && !line.text.contains("├─")
-            && !line.text.contains("└─")
-        {
-            self.section
-        } else if line.forward_index.is_none() {
-            self.tree
-        } else {
-            Color::Reset
+        match line.kind {
+            TreeLineKind::ManualHeader => self.manual,
+            TreeLineKind::Section => self.section,
+            TreeLineKind::Branch => self.tree,
+            TreeLineKind::Blank | TreeLineKind::Forward => Color::Reset,
         }
     }
 }
@@ -1282,7 +1253,7 @@ mod dashboard_render_tests {
         pane_metadata, process_icon, render_dashboard_shortcuts, shortcut_text,
         split_tree_metadata, status, tab_icon, tree_forward_indexes, tree_line_color,
         tree_prefix_length, tree_scroll_window, tree_text, truncate, tunnel_status, tunnel_time,
-        uses_light_palette, DashboardPalette, TreeLine,
+        uses_light_palette, DashboardPalette, TreeLine, TreeLineKind,
     };
 
     fn forward(automatic: bool, enabled: bool, pane_id: &str) -> Forward {
@@ -1435,6 +1406,7 @@ mod dashboard_render_tests {
         let line = TreeLine {
             text: "          server —  ·  tunnel —".into(),
             forward_index: Some(0),
+            kind: TreeLineKind::Forward,
         };
         assert_eq!(
             tree_line_color(&line, false, &[forward(true, true, "w1:p1")]),
@@ -1474,6 +1446,7 @@ mod dashboard_render_tests {
         assert_eq!(palette.paused, Color::AnsiValue(136));
         assert_eq!(palette.section, Color::DarkCyan);
         assert_eq!(palette.tree, Color::DarkBlue);
+        assert_eq!(palette.selection, Color::AnsiValue(252));
         assert!(!palette.dim_metadata);
         assert!(!palette.dim_paused);
     }
@@ -1483,14 +1456,17 @@ mod dashboard_render_tests {
         let active_line = TreeLine {
             text: "  ● ACTIVE".into(),
             forward_index: Some(0),
+            kind: TreeLineKind::Forward,
         };
         let paused_line = TreeLine {
             text: "  ○ PAUSED".into(),
             forward_index: Some(0),
+            kind: TreeLineKind::Forward,
         };
         let header_line = TreeLine {
             text: "  󰉋 Product".into(),
             forward_index: None,
+            kind: TreeLineKind::Section,
         };
 
         assert_eq!(
@@ -1512,6 +1488,7 @@ mod dashboard_render_tests {
         let paused_line = TreeLine {
             text: "  ○ PAUSED".into(),
             forward_index: Some(0),
+            kind: TreeLineKind::Forward,
         };
         let forwards = [forward(true, false, "w1:p1")];
 

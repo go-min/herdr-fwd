@@ -5,12 +5,29 @@ Versioning.
 
 ## [Unreleased]
 
-## [0.1.5] - 2026-08-04
+## [0.1.5] - 2026-08-05
 
 ### Changed
 
 - Require Herdr 0.8.0 through 0.8.x on local and remote hosts.
+- Scope discovery, dashboards, manual mappings, and watcher ownership to the
+  exact default or named Herdr session.
+- Use one status-first, version-pinned remote plugin lifecycle for attach and
+  explicit management commands, with verified exact-platform release fallback.
+- Centralize framework/runtime detection and theme-aware dashboard colors.
 - Refresh the production Overview recording for the Herdr 0.8 remote flow.
+
+### Fixed
+
+- Keep companion heartbeats independent from listener discovery, batch socket
+  inspection, and surface partial reconciliation failures.
+- Make forwarding-state writes concurrency-safe and roll live tunnels back when
+  persistence fails.
+- Fail closed on release and cache integrity errors, publish cache entries
+  atomically, and roll back failed managed-bundle activation.
+- Preserve the onboarding preference across installs while preventing stale
+  provenance from claiming manually reinstalled or relinked plugins.
+- Harden demo cleanup, release gates, package smoke tests, and shell checks.
 
 ## [0.1.4] - 2026-07-30
 
@@ -37,8 +54,8 @@ Versioning.
   wrapper while leaving other Herdr commands unchanged.
 - Short `hfwd` executable name while the project, plugin, formula, archives,
   and persistent state retain the `herdr-fwd` identity.
-- Source-build fallback for plugin installation when a matching prebuilt GitHub
-  Release archive does not exist yet.
+- Checksum-verified exact-platform release fallback for remote plugin hosts
+  without GitHub access.
 
 ## [0.1.2] - 2026-07-30
 

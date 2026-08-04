@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2317 # The file supports both sourcing and execution.
 set -eu
 
 repo_root=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../../.." && pwd)
@@ -13,18 +14,44 @@ fi
   return 1 2>/dev/null || exit 1
 }
 
-case "$demo_root" in
-  /private/tmp/herdr-fwd-vhs*|/tmp/herdr-fwd-vhs*) ;;
+demo_parent=${demo_root%/*}
+demo_name=${demo_root##*/}
+case "$demo_parent:$demo_name" in
+  /private/tmp:herdr-fwd-vhs*|/tmp:herdr-fwd-vhs*) ;;
   *)
     printf 'README demo refuses unsafe root: %s\n' "$demo_root" >&2
+    return 1 2>/dev/null || exit 1
+    ;;
+esac
+[ ! -L "$demo_root" ] || {
+  printf 'README demo refuses a symlink root: %s\n' "$demo_root" >&2
+  return 1 2>/dev/null || exit 1
+}
+case "/$demo_root/" in
+  */../*|*/./*)
+    printf 'README demo refuses non-canonical root: %s\n' "$demo_root" >&2
     return 1 2>/dev/null || exit 1
     ;;
 esac
 
 herdr_fwd_demo_cleanup() {
   if [ -f "$demo_root/companion.pid" ]; then
-    kill "$(cat "$demo_root/companion.pid")" 2>/dev/null || true
+    companion_pid=$(cat "$demo_root/companion.pid")
+    case "$companion_pid" in
+      ''|*[!0-9]*) ;;
+      *)
+        companion_command=$(ps -p "$companion_pid" -o command= 2>/dev/null || true)
+        case "$companion_command" in
+          *".github/assets/demo/companion.py"*"--port $demo_port"*)
+            kill "$companion_pid" 2>/dev/null || true
+            rm -rf -- "$demo_root"
+            wait "$companion_pid" 2>/dev/null || true
+            ;;
+        esac
+        ;;
+    esac
   fi
+  rm -rf -- "$demo_root"
 }
 
 herdr_fwd_demo_cleanup
@@ -51,8 +78,9 @@ done
 
 cat >"$demo_root/session.json" <<EOF
 {
-  "protocolVersion": 1,
+  "protocolVersion": 2,
   "sessionId": "0123456789abcdef01234567",
+  "herdrSession": "default",
   "token": "abababababababababababababababababababababababababababababababab",
   "rpcUrl": "http://127.0.0.1:$demo_port",
   "autoDetect": true
@@ -65,6 +93,8 @@ export XDG_STATE_HOME="$demo_root/state"
 export HERDR_FWD_DEMO_SESSION="$demo_root/session.json"
 export HERDR_BIN_PATH="$repo_root/.github/assets/demo/herdr"
 export PS1='demo ❯ '
+unset HERDR_PANE_ID HERDR_TAB_ID HERDR_WORKSPACE_ID HERDR_SOCKET_PATH HERDR_SESSION
+unset HERDR_PLUGIN_ROOT HERDR_PLUGIN_CONFIG_DIR
 unset NO_COLOR
 export TERM=xterm-256color
 export CLICOLOR_FORCE=1

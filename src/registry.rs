@@ -72,6 +72,12 @@ pub struct Registry<S: Ssh> {
     pub now: fn() -> u64,
 }
 
+#[derive(Clone)]
+pub struct RegistrySnapshot {
+    forwards: BTreeMap<String, Forward>,
+    next: u64,
+}
+
 impl<S: Ssh> Registry<S> {
     pub fn new(ssh: S) -> Self {
         Self {
@@ -80,6 +86,68 @@ impl<S: Ssh> Registry<S> {
             ssh,
             port_available: |port| std::net::TcpListener::bind(("127.0.0.1", port)).is_ok(),
             now: unix_time_now,
+        }
+    }
+
+    pub fn snapshot(&self) -> RegistrySnapshot {
+        RegistrySnapshot {
+            forwards: self.forwards.clone(),
+            next: self.next,
+        }
+    }
+
+    pub fn restore(&mut self, snapshot: RegistrySnapshot) -> Result<(), String> {
+        let current = self.forwards.clone();
+        let mut errors = Vec::new();
+
+        for forward in current.values().filter(|forward| forward.enabled) {
+            let keep = snapshot
+                .forwards
+                .values()
+                .any(|candidate| candidate.enabled && same_tunnel(candidate, forward));
+            if keep {
+                continue;
+            }
+            match self.ssh.cancel(
+                forward.local_port,
+                &forward.remote_host,
+                forward.remote_port,
+            ) {
+                Ok(()) => {
+                    if let Some(current) = self.forwards.get_mut(&forward.id) {
+                        current.enabled = false;
+                        current.tunnel_opened_at = 0;
+                    }
+                }
+                Err(error) => errors.push(format!("cancel {}: {error}", forward.id)),
+            }
+        }
+
+        for forward in snapshot.forwards.values().filter(|forward| forward.enabled) {
+            let present = current
+                .values()
+                .any(|candidate| candidate.enabled && same_tunnel(candidate, forward));
+            if present {
+                continue;
+            }
+            match self.ssh.forward(
+                forward.local_port,
+                &forward.remote_host,
+                forward.remote_port,
+            ) {
+                Ok(()) => {
+                    self.forwards.insert(forward.id.clone(), forward.clone());
+                }
+                Err(error) => errors.push(format!("restore {}: {error}", forward.id)),
+            }
+        }
+
+        if errors.is_empty() {
+            self.forwards = snapshot.forwards;
+            self.next = self.next.max(snapshot.next);
+            Ok(())
+        } else {
+            Err(errors.join("; "))
         }
     }
 
@@ -293,6 +361,12 @@ impl<S: Ssh> Registry<S> {
             .filter_map(|id| self.remove(&id).err().map(|error| format!("{id}: {error}")))
             .collect()
     }
+}
+
+fn same_tunnel(left: &Forward, right: &Forward) -> bool {
+    left.local_port == right.local_port
+        && left.remote_port == right.remote_port
+        && left.remote_host == right.remote_host
 }
 
 fn unix_time_now() -> u64 {

@@ -1,5 +1,5 @@
 use std::{
-    io::Write,
+    io::{Read, Write},
     path::Path,
     process::{Child, Command, Stdio},
     thread,
@@ -10,6 +10,7 @@ use herdr_fwd::registry::Ssh;
 
 const SSH_CONTROL_TIMEOUT: Duration = Duration::from_secs(10);
 const SSH_FORWARD_TIMEOUT: Duration = Duration::from_secs(3);
+pub(crate) const SSH_DEPLOYMENT_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[derive(Clone)]
 pub(crate) struct SshClient {
@@ -107,18 +108,39 @@ impl SshClient {
     }
 
     pub(crate) fn remote_command(&self, command: &str) -> Result<String, String> {
-        self.invoke(&[
-            "-S".into(),
-            self.control_path.display().to_string(),
-            self.target.clone(),
-            command.into(),
-        ])
+        self.remote_command_with_timeout(command, SSH_CONTROL_TIMEOUT)
+    }
+
+    pub(crate) fn remote_command_with_timeout(
+        &self,
+        command: &str,
+        timeout: Duration,
+    ) -> Result<String, String> {
+        self.invoke_with_timeout(
+            &[
+                "-S".into(),
+                self.control_path.display().to_string(),
+                self.target.clone(),
+                command.into(),
+            ],
+            timeout,
+            "SSH remote command",
+        )
     }
 
     pub(crate) fn remote_command_with_stdin(
         &self,
         command: &str,
         input: &[u8],
+    ) -> Result<String, String> {
+        self.remote_command_with_stdin_timeout(command, input, SSH_CONTROL_TIMEOUT)
+    }
+
+    pub(crate) fn remote_command_with_stdin_timeout(
+        &self,
+        command: &str,
+        input: &[u8],
+        timeout: Duration,
     ) -> Result<String, String> {
         let mut child = Command::new("ssh")
             .args([
@@ -132,18 +154,19 @@ impl SshClient {
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|error| format!("failed to execute ssh: {error}"))?;
-        let upload = child
+        let mut stdin = child
             .stdin
             .take()
-            .ok_or_else(|| "failed to open SSH stdin".to_string())?
-            .write_all(input);
-        if let Err(error) = upload {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(format!("failed to upload remote session: {error}"));
-        }
-        let output = wait_with_output_timeout(child, SSH_CONTROL_TIMEOUT, "SSH session upload")?;
+            .ok_or_else(|| "failed to open SSH stdin".to_string())?;
+        let input = input.to_vec();
+        let upload = thread::spawn(move || stdin.write_all(&input));
+        let output_result = wait_with_output_timeout(child, timeout, "SSH session upload");
+        let upload_result = upload
+            .join()
+            .map_err(|_| "SSH upload thread panicked".to_string())?;
+        let output = output_result?;
         if output.status.success() {
+            upload_result.map_err(|error| format!("failed to upload remote session: {error}"))?;
             Ok(String::from_utf8_lossy(&output.stdout).into_owned())
         } else {
             Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
@@ -166,13 +189,21 @@ fn wait_with_output_timeout(
     timeout: Duration,
     operation: &str,
 ) -> Result<std::process::Output, String> {
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "failed to capture ssh stdout".to_string())?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "failed to capture ssh stderr".to_string())?;
+    let stdout = thread::spawn(move || read_stream(stdout));
+    let stderr = thread::spawn(move || read_stream(stderr));
     let started = Instant::now();
     loop {
         match child.try_wait() {
-            Ok(Some(_)) => {
-                return child
-                    .wait_with_output()
-                    .map_err(|error| format!("failed to collect ssh output: {error}"));
+            Ok(Some(status)) => {
+                return collect_output(status, stdout, stderr);
             }
             Ok(None) if started.elapsed() < timeout => {
                 thread::sleep(Duration::from_millis(25));
@@ -180,14 +211,48 @@ fn wait_with_output_timeout(
             Ok(None) => {
                 let _ = child.kill();
                 let _ = child.wait();
+                let _ = stdout.join();
+                let _ = stderr.join();
                 return Err(format!(
                     "{operation} timed out after {}s",
                     timeout.as_secs()
                 ));
             }
-            Err(error) => return Err(format!("failed to inspect ssh process: {error}")),
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = stdout.join();
+                let _ = stderr.join();
+                return Err(format!("failed to inspect ssh process: {error}"));
+            }
         }
     }
+}
+
+fn read_stream(mut stream: impl Read) -> std::io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    stream.read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
+fn collect_output(
+    status: std::process::ExitStatus,
+    stdout: thread::JoinHandle<std::io::Result<Vec<u8>>>,
+    stderr: thread::JoinHandle<std::io::Result<Vec<u8>>>,
+) -> Result<std::process::Output, String> {
+    let stdout = stdout
+        .join()
+        .map_err(|_| "failed to join ssh stdout reader".to_string())?
+        .map_err(|error| format!("failed to read ssh stdout: {error}"))?;
+    let stderr = stderr
+        .join()
+        .map_err(|_| "failed to join ssh stderr reader".to_string())?
+        .map_err(|error| format!("failed to read ssh stderr: {error}"))?;
+    Ok(std::process::Output {
+        status,
+        stdout,
+        stderr,
+    })
 }
 
 impl Ssh for SshClient {

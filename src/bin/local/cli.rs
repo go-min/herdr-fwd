@@ -12,7 +12,8 @@ use std::{
 };
 
 use herdr_fwd::{
-    registry::Registry, shell::quote as shell_quote, RemoteSessionConfig, PROTOCOL_VERSION,
+    herdr_session_storage_key, registry::Registry, shell::quote as shell_quote,
+    RemoteSessionConfig, PROTOCOL_VERSION,
 };
 use tiny_http::Server;
 
@@ -109,10 +110,11 @@ fn run() -> Result<(), String> {
     let remote_rpc_port = establish_reverse_rpc(&client, companion_port)?;
     let token = secure_random_hex(32)?;
     let session_id = secure_random_hex(12)?;
-    let remote_path = remote_session_path(&session_id);
+    let remote_path = remote_session_path(&herdr_session, &session_id)?;
     let remote_config = RemoteSessionConfig {
         protocol_version: PROTOCOL_VERSION,
         session_id: session_id.clone(),
+        herdr_session: herdr_session.clone(),
         token: token.clone(),
         rpc_url: format!("http://127.0.0.1:{remote_rpc_port}"),
         auto_detect: cli.auto_detect,
@@ -178,8 +180,11 @@ fn wake_remote_watcher(client: &SshClient, cli: &Cli) {
     let _ = client.remote_command(&command);
 }
 
-fn remote_session_path(session_id: &str) -> String {
-    format!("$HOME/.cache/herdr-fwd/session-{session_id}.json")
+fn remote_session_path(herdr_session: &str, session_id: &str) -> Result<String, String> {
+    let scope = herdr_session_storage_key(herdr_session)?;
+    Ok(format!(
+        "$HOME/.cache/herdr-fwd/sessions/{scope}/session-{session_id}.json"
+    ))
 }
 
 fn remote_herdr_session_name(cli: &Cli) -> String {
@@ -495,8 +500,8 @@ mod cli_tests {
     #[test]
     fn writes_remote_session_into_the_plugin_runtime_cache_directory() {
         assert_eq!(
-            remote_session_path("0123456789abcdef"),
-            "$HOME/.cache/herdr-fwd/session-0123456789abcdef.json"
+            remote_session_path("review", "0123456789abcdef").unwrap(),
+            "$HOME/.cache/herdr-fwd/sessions/session-726576696577/session-0123456789abcdef.json"
         );
     }
 

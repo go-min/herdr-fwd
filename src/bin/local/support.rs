@@ -1,7 +1,6 @@
 use std::{
     env, fs,
-    fs::OpenOptions,
-    io::{Read, Write},
+    io::Read,
     net::TcpListener,
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -10,7 +9,7 @@ use std::{
 use serde::Serialize;
 
 #[cfg(unix)]
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 
 use crate::local::{
     companion::establish_reverse_rpc,
@@ -96,20 +95,8 @@ pub(crate) fn state_directory() -> Result<PathBuf, String> {
 }
 
 pub(crate) fn write_private_json<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
-    let temporary = path.with_extension("json.tmp");
     let bytes = serde_json::to_vec(value).map_err(|error| error.to_string())?;
-    let mut options = OpenOptions::new();
-    options.create(true).truncate(true).write(true);
-    #[cfg(unix)]
-    options.mode(0o600);
-    let mut file = options
-        .open(&temporary)
-        .map_err(|error| format!("failed to write {}: {error}", temporary.display()))?;
-    file.write_all(&bytes)
-        .and_then(|_| file.sync_all())
-        .map_err(|error| format!("failed to persist {}: {error}", temporary.display()))?;
-    fs::rename(&temporary, path)
-        .map_err(|error| format!("failed to commit {}: {error}", path.display()))
+    herdr_fwd::atomic::write_file(path, &bytes, 0o600)
 }
 
 pub(crate) fn secure_random_hex(bytes: usize) -> Result<String, String> {

@@ -75,14 +75,14 @@ XDG_CONFIG_HOME="$temporary/config-home" XDG_STATE_HOME="$temporary/manual-state
 [ -f "$manual_state/plugin-origin.toml" ] || \
   die "hfwd-managed plugin install cleared remote provenance"
 cat > "$plugin_config/config.toml" <<'EOF'
-onboarding = false
+onboarding = false # user preference must survive reinstall
 after_forward = "popup"
 process_tree_depth = 7
 EOF
 XDG_CONFIG_HOME="$temporary/config-home" HERDR_FWD_RELEASE_BASE="file://$release" \
   "$root/scripts/install-plugin-binary.sh" >/dev/null
-[ "$(sed -n 's/^onboarding = //p' "$plugin_config/config.toml")" = true ] || \
-  die "local reinstall did not reset onboarding"
+[ "$(sed -n 's/^onboarding = //p' "$plugin_config/config.toml")" = false ] || \
+  die "local reinstall did not preserve onboarding preference"
 [ -z "$(sed -n 's/^installation_source = //p' "$plugin_config/config.toml")" ] || \
   die "local reinstall retained installation source in config"
 grep -F 'after_forward = "popup"' "$plugin_config/config.toml" >/dev/null || \
@@ -107,8 +107,8 @@ EOF
 HERDR_PLUGIN_CONFIG_DIR="$temporary/wrapper-config" \
   HERDR_FWD_RELEASE_BASE="file://$release" \
   "$wrapper_checkout/scripts/install-plugin-binary.sh" >/dev/null
-[ "$(sed -n 's/^onboarding = //p' "$temporary/wrapper-config/config.toml")" = true ] || \
-  die "remote reinstall did not reset onboarding"
+[ "$(sed -n 's/^onboarding = //p' "$temporary/wrapper-config/config.toml")" = false ] || \
+  die "remote reinstall did not preserve onboarding preference"
 grep -F 'after_forward = "nothing"' "$temporary/wrapper-config/config.toml" >/dev/null || \
   die "remote reinstall discarded after_forward"
 grep -F 'process_tree_depth = 6' "$temporary/wrapper-config/config.toml" >/dev/null || \

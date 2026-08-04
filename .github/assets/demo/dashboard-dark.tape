@@ -15,7 +15,7 @@ Env COLORFGBG "15;0"
 Hide
 Type "source .github/assets/demo/setup.sh" Enter
 Sleep 1s
-Type "$HERDR_FWD_DEMO_BIN dashboard $HERDR_FWD_DEMO_SESSION; herdr_fwd_demo_cleanup" Enter
+Type "set +e; $HERDR_FWD_DEMO_BIN dashboard $HERDR_FWD_DEMO_SESSION; herdr_fwd_demo_cleanup" Enter
 Sleep 1s
 Show
 Sleep 2s
@@ -24,3 +24,4 @@ Sleep 1s
 Type " "
 Sleep 2s
 Type "q"
+Sleep 1s

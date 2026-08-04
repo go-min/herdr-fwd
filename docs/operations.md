@@ -45,12 +45,15 @@ brew install go-min/tap/herdr-fwd
 Both installation methods provide the `hfwd` executable. The repository,
 plugin, release archives, and Homebrew formula keep the `herdr-fwd` name.
 
-The remote host needs Herdr 0.8.x, OpenSSH access, `git`, `curl`,
-`tar`, `lsof`, a SHA-256 utility, and outbound GitHub access. The local host
-needs the same archive tools. When the manifest version has no matching GitHub
-Release archive yet, installation fails with an actionable error; production
-hosts never build the plugin from a checkout with Cargo. Published releases continue
-to install the checksum-verified native binary without Rust.
+The remote host needs Herdr 0.8.x, OpenSSH access, `ps`, and listener inspection
+through `lsof` (macOS/Linux) or `ss` (Linux). Herdr's preferred install path
+also uses `git`, `curl`, `tar`, a SHA-256 utility, and outbound GitHub access.
+If that exact release is unreachable remotely, the local host downloads the
+archive for the remote platform, verifies `SHA256SUMS`, and transfers only the
+plugin bundle. A versioned verified cache is the final fallback when GitHub is
+unavailable locally too. A missing release, checksum failure, or absent exact
+cache artifact is an actionable error; production never sends a locally built
+or incompatible binary.
 
 ## Intercept `herdr --remote`
 
@@ -122,6 +125,10 @@ Remove the plugin from the current machine:
 ```bash
 herdr plugin uninstall herdr.fwd
 ```
+
+Use `herdr plugin unlink herdr.fwd` for a source-linked development checkout.
+The quick onboarding action and `hfwd remote uninstall` detect the managed
+fallback bundle, unlink it, remove its files, and clear remote-origin metadata.
 
 When `hfwd` originally installed the plugin, the first-run popup provides
 the same quick action.

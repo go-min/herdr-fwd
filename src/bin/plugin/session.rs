@@ -1,16 +1,11 @@
 use std::{
     env, fs,
-    fs::OpenOptions,
-    io::Write,
     path::{Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
 };
 
+use herdr_fwd::herdr_session_storage_key;
 use herdr_fwd::RemoteSessionConfig;
 use serde::{Deserialize, Serialize};
-
-#[cfg(unix)]
-use std::os::unix::fs::OpenOptionsExt;
 
 use crate::plugin::{herdr::herdr_output, rpc::list_forwards};
 
@@ -28,7 +23,68 @@ pub(crate) fn session_directory() -> Result<PathBuf, String> {
         return Ok(PathBuf::from(directory));
     }
     let home = env::var_os("HOME").ok_or_else(|| "HOME is not set".to_string())?;
-    Ok(PathBuf::from(home).join(".cache/herdr-fwd"))
+    let scope = herdr_session_storage_key(&current_herdr_session()?)?;
+    Ok(PathBuf::from(home)
+        .join(".cache/herdr-fwd/sessions")
+        .join(scope))
+}
+
+pub(crate) fn current_herdr_session() -> Result<String, String> {
+    herdr_session_from_inputs(
+        env::var_os("HERDR_SOCKET_PATH").as_deref(),
+        env::var_os("HERDR_SESSION").as_deref(),
+    )
+}
+
+pub(crate) fn validate_current_herdr_session(config: &RemoteSessionConfig) -> Result<(), String> {
+    let current_session = current_herdr_session()?;
+    if config.herdr_session == current_session {
+        Ok(())
+    } else {
+        Err(format!(
+            "session file belongs to Herdr session {:?}, current session is {:?}",
+            config.herdr_session, current_session
+        ))
+    }
+}
+
+fn herdr_session_from_inputs(
+    socket_path: Option<&std::ffi::OsStr>,
+    session: Option<&std::ffi::OsStr>,
+) -> Result<String, String> {
+    if let Some(socket_path) = socket_path.filter(|path| !path.is_empty()) {
+        let socket_path = Path::new(socket_path);
+        if socket_path.file_name().and_then(|name| name.to_str()) == Some("herdr.sock") {
+            let parent = socket_path.parent();
+            if parent
+                .and_then(Path::parent)
+                .and_then(Path::file_name)
+                .and_then(|name| name.to_str())
+                == Some("sessions")
+            {
+                return parent
+                    .and_then(Path::file_name)
+                    .and_then(|name| name.to_str())
+                    .filter(|name| !name.is_empty())
+                    .map(str::to_owned)
+                    .ok_or_else(|| "HERDR_SOCKET_PATH has no valid session name".to_string());
+            }
+            if parent
+                .and_then(Path::file_name)
+                .and_then(|name| name.to_str())
+                == Some("herdr")
+            {
+                return Ok("default".into());
+            }
+        }
+    }
+    match session.filter(|session| !session.is_empty()) {
+        Some(session) => session
+            .to_str()
+            .map(str::to_owned)
+            .ok_or_else(|| "HERDR_SESSION is not valid UTF-8".to_string()),
+        None => Ok("default".into()),
+    }
 }
 
 pub(crate) fn installation_state_directory() -> Result<PathBuf, String> {
@@ -169,42 +225,7 @@ pub(crate) fn read_json_file<T: for<'de> Deserialize<'de>>(path: &Path) -> Resul
 
 pub(crate) fn write_json_file<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
     let bytes = serde_json::to_vec(value).map_err(|error| error.to_string())?;
-    let temporary_path = temporary_json_path(path)?;
-    let result = (|| {
-        let mut temporary_file = private_temporary_file(&temporary_path)?;
-        temporary_file
-            .write_all(&bytes)
-            .and_then(|_| temporary_file.flush())
-            .map_err(|error| format!("{}: {error}", temporary_path.display()))?;
-        drop(temporary_file);
-        fs::rename(&temporary_path, path).map_err(|error| format!("{}: {error}", path.display()))
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary_path);
-    }
-    result
-}
-
-fn temporary_json_path(path: &Path) -> Result<PathBuf, String> {
-    static NEXT_TEMPORARY_FILE: AtomicU64 = AtomicU64::new(0);
-
-    let directory = path.parent().unwrap_or_else(|| Path::new("."));
-    let name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| format!("{}: path has no valid file name", path.display()))?;
-    let sequence = NEXT_TEMPORARY_FILE.fetch_add(1, Ordering::Relaxed);
-    Ok(directory.join(format!(".{name}.tmp-{}-{sequence}", std::process::id())))
-}
-
-fn private_temporary_file(path: &Path) -> Result<fs::File, String> {
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    options.mode(0o600);
-    options
-        .open(path)
-        .map_err(|error| format!("{}: {error}", path.display()))
+    herdr_fwd::atomic::write_file(path, &bytes, 0o600)
 }
 
 #[cfg(test)]
@@ -221,7 +242,8 @@ mod session_tests {
 
     use super::{
         cleanup_orphan_dashboards_with, cleanup_remote_session_with, close_dashboard_with,
-        dashboard_marker_path, is_session_file, read_json_file, write_json_file, DashboardMarker,
+        dashboard_marker_path, herdr_session_from_inputs, is_session_file, read_json_file,
+        write_json_file, DashboardMarker,
     };
 
     struct TestDirectory(PathBuf);
@@ -376,6 +398,32 @@ mod session_tests {
         assert!(
             !marker_path.exists(),
             "a later successful scan should remove the retried marker"
+        );
+    }
+
+    #[test]
+    fn derives_the_active_herdr_session_from_the_socket_before_the_environment() {
+        assert_eq!(
+            herdr_session_from_inputs(
+                Some(std::ffi::OsStr::new(
+                    "/home/test/.config/herdr/sessions/review/herdr.sock"
+                )),
+                Some(std::ffi::OsStr::new("stale")),
+            )
+            .unwrap(),
+            "review"
+        );
+        assert_eq!(
+            herdr_session_from_inputs(
+                Some(std::ffi::OsStr::new("/home/test/.config/herdr/herdr.sock")),
+                Some(std::ffi::OsStr::new("stale")),
+            )
+            .unwrap(),
+            "default"
+        );
+        assert_eq!(
+            herdr_session_from_inputs(None, Some(std::ffi::OsStr::new("preview"))).unwrap(),
+            "preview"
         );
     }
 }

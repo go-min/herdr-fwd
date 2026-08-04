@@ -15,11 +15,12 @@ Env COLORFGBG "0;15"
 Hide
 Type "source .github/assets/demo/setup.sh" Enter
 Sleep 1s
-Type "$HERDR_FWD_DEMO_BIN dashboard $HERDR_FWD_DEMO_SESSION; herdr_fwd_demo_cleanup" Enter
+Type "set +e; $HERDR_FWD_DEMO_BIN dashboard $HERDR_FWD_DEMO_SESSION; herdr_fwd_demo_cleanup" Enter
 Sleep 1s
 Type "h"
 Sleep 1s
 Show
 Sleep 4s
-Type "Esc"
+Escape
 Type "q"
+Sleep 1s

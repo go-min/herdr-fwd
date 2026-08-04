@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2029 # Validated local identifiers are intentionally expanded into remote commands.
 set -euo pipefail
 
 repo_root=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../../.." && pwd)
@@ -9,9 +10,18 @@ local_herdr=${HERDR_FWD_DEMO_HERDR:-$(command -v herdr)}
 session=${HERDR_FWD_DEMO_SESSION:-herdr-fwd-overview-$RANDOM-$RANDOM}
 herdr_theme=${HERDR_FWD_DEMO_THEME:-dracula}
 
-case "$demo_root" in
-  /private/tmp/herdr-fwd-vhs-overview*|/tmp/herdr-fwd-vhs-overview*) ;;
+demo_parent=${demo_root%/*}
+demo_name=${demo_root##*/}
+case "$demo_parent:$demo_name" in
+  /private/tmp:herdr-fwd-vhs-overview*|/tmp:herdr-fwd-vhs-overview*) ;;
   *) printf 'Overview demo refuses unsafe root: %s\n' "$demo_root" >&2; exit 1 ;;
+esac
+[ ! -L "$demo_root" ] || {
+  printf 'Overview demo refuses a symlink root: %s\n' "$demo_root" >&2
+  exit 1
+}
+case "/$demo_root/" in
+  */../*|*/./*) printf 'Overview demo refuses non-canonical root: %s\n' "$demo_root" >&2; exit 1 ;;
 esac
 case "$target" in
   lima-*) ;;
@@ -29,9 +39,20 @@ esac
 }
 
 cleanup() {
-  ssh "$target" "export PATH=\"\$HOME/.local/bin:\$PATH\"; herdr session stop '$session' --json >/dev/null 2>&1 || true; herdr session delete '$session' --json >/dev/null 2>&1 || true"
+  if [ -n "${dashboard_action_pid:-}" ]; then
+    kill "$dashboard_action_pid" 2>/dev/null || true
+    wait "$dashboard_action_pid" 2>/dev/null || true
+  fi
+  ssh "$target" "export PATH=\"\$HOME/.local/bin:\$PATH\"; herdr session stop '$session' --json >/dev/null 2>&1 || true; herdr session delete '$session' --json >/dev/null 2>&1 || true; rm -f -- \"\$HOME/.cache/herdr-fwd/overview-server-$session.log\""
+  if [ -n "${config_backup_ready:-}" ]; then
+    ssh "$target" "config=\"\$HOME/.config/herdr/config.toml\"; backup=\"\$HOME/.cache/herdr-fwd/demo-config-$session\"; if [ -f \"\$backup\" ]; then mv -f \"\$backup\" \"\$config\"; elif [ -f \"\$backup.absent\" ]; then rm -f -- \"\$config\"; fi; rm -f -- \"\$backup\" \"\$backup.absent\"" || true
+  fi
+  rm -rf -- "$demo_root"
 }
 trap cleanup EXIT HUP INT TERM
+
+ssh "$target" "set -eu; config=\"\$HOME/.config/herdr/config.toml\"; backup=\"\$HOME/.cache/herdr-fwd/demo-config-$session\"; install -d -m 700 \"\$HOME/.cache/herdr-fwd\"; rm -f -- \"\$backup\" \"\$backup.absent\"; if [ -f \"\$config\" ]; then cp -p \"\$config\" \"\$backup\"; else : > \"\$backup.absent\"; fi"
+config_backup_ready=1
 
 config=$(cat <<EOF
 [theme]
@@ -53,7 +74,7 @@ delivery = "herdr"
 EOF
 )
 printf '%s\n' "$config" | ssh "$target" 'mkdir -p "$HOME/.config/herdr"; cat > "$HOME/.config/herdr/config.toml"'
-ssh "$target" "export PATH=\"\$HOME/.local/bin:\$PATH\"; nohup herdr --session '$session' server >\"\$HOME/.cache/herdr-fwd/overview-server.log\" 2>&1 &"
+ssh "$target" "export PATH=\"\$HOME/.local/bin:\$PATH\"; nohup herdr --session '$session' server >\"\$HOME/.cache/herdr-fwd/overview-server-$session.log\" 2>&1 &"
 
 for _ in {1..40}; do
   if ssh "$target" "export PATH=\"\$HOME/.local/bin:\$PATH\"; herdr --session '$session' status server" >/dev/null 2>&1; then
@@ -91,6 +112,7 @@ start_server "$next_pane" next 4000
   ssh "$target" "export PATH=\"\$HOME/.local/bin:\$PATH\"; herdr --session '$session' plugin action invoke open-dashboard-popup --plugin herdr.fwd" \
     >"$demo_root/dashboard-action.log" 2>&1 || true
 ) &
+dashboard_action_pid=$!
 
 PATH="$(dirname "$local_herdr"):$PATH" \
   "$repo_root/target/release/hfwd" "$target" -- --session "$session" --handoff --remote-keybindings server

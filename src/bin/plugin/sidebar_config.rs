@@ -1,8 +1,4 @@
-use std::{
-    env, fs,
-    path::PathBuf,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::{env, fs, path::PathBuf};
 
 use toml_edit::{value, Array, ArrayOfTables, DocumentMut, Item, Table, Value};
 
@@ -29,25 +25,26 @@ pub(crate) fn set_ports_row(enabled: bool) -> Result<DashboardSetupStatus, Strin
 }
 
 pub(crate) fn dashboard_setup_status() -> Result<DashboardSetupStatus, String> {
-    let path = herdr_config_path()?;
-    let config = match fs::read_to_string(&path) {
-        Ok(config) => config,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Default::default()),
-        Err(error) => return Err(format!("failed to read {}: {error}", path.display())),
-    };
-    let document = parse_config(&config)?;
-    Ok(dashboard_setup_status_from_document(&document))
+    Ok(read_config_document()?
+        .as_ref()
+        .map(dashboard_setup_status_from_document)
+        .unwrap_or_default())
 }
 
 pub(crate) fn configured_theme_name() -> Result<Option<String>, String> {
+    Ok(read_config_document()?
+        .as_ref()
+        .and_then(theme_name_from_document))
+}
+
+fn read_config_document() -> Result<Option<DocumentMut>, String> {
     let path = herdr_config_path()?;
     let config = match fs::read_to_string(&path) {
         Ok(config) => config,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(format!("failed to read {}: {error}", path.display())),
     };
-    let document = parse_config(&config)?;
-    Ok(theme_name_from_document(&document))
+    parse_config(&config).map(Some)
 }
 
 pub(crate) fn enable_herdr_notifications() -> Result<DashboardSetupStatus, String> {
@@ -74,7 +71,7 @@ fn update_config(
         return Ok(path);
     }
     if !existing.is_empty() {
-        let backup = path.with_extension("toml.herdr-rpf.bak");
+        let backup = path.with_extension("toml.herdr-fwd.bak");
         fs::copy(&path, &backup).map_err(|error| {
             format!(
                 "failed to back up {} to {}: {error}",
@@ -88,15 +85,7 @@ fn update_config(
         .ok_or_else(|| format!("config path has no parent: {}", path.display()))?;
     fs::create_dir_all(parent)
         .map_err(|error| format!("failed to create {}: {error}", parent.display()))?;
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|error| error.to_string())?
-        .as_nanos();
-    let temporary = parent.join(format!(".config.toml.herdr-rpf-{nonce}.tmp"));
-    fs::write(&temporary, updated)
-        .map_err(|error| format!("failed to write {}: {error}", temporary.display()))?;
-    fs::rename(&temporary, &path)
-        .map_err(|error| format!("failed to update {}: {error}", path.display()))?;
+    herdr_fwd::atomic::write_file(&path, updated.as_bytes(), 0o600)?;
     Ok(path)
 }
 

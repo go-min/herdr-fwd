@@ -6,21 +6,22 @@
   pre-1.0 minor releases may change the plugin or socket contract. A new Herdr
   minor line must be validated before this guard is widened.
 - Password-only SSH may authenticate separately for Herdr and the companion.
-- Herdr 0.7.x does not expose attached-client transport identity to plugins.
-  Onboarding is suppressed by the wrapper's active session file, but a plain
+- Herdr does not expose attached-client transport identity to plugins.
+  Onboarding is suppressed by the wrapper's session-scoped active file, but a plain
   `herdr --remote` client that bypasses the wrapper cannot be distinguished
   from a local client.
 - Discovery uses `lsof` for TCP listeners owned by foreground pane processes
-  and their configured descendant depth. It requires `lsof` and `ps`, supports
-  only loopback binds (`127.0.0.1`, `localhost`, and `::1`), and cannot infer whether the listener
-  serves HTTP or HTTPS.
+  and their configured descendant depth, merging `ss` results on Linux. It
+  requires `ps` plus `lsof` on macOS or either `lsof` or `ss` on Linux,
+  supports only loopback binds (`127.0.0.1`, `localhost`, and `::1`), and
+  cannot infer whether the listener serves HTTP or HTTPS.
 - Discovery is driven by Herdr pane events with a 15-second reconciliation
   fallback; Docker/Kubernetes discovery is out of scope.
 - The remote dashboard is a terminal UI rather than a separate native sidebar
   section. It publishes a configurable `$port_forward_status` metadata token
   on the source Space, but current Herdr has no plugin-defined sidebar sections.
-  It uses a fixed ANSI color palette and terminal attributes instead of parsing
-  private theme configuration, so exact shades depend on the terminal palette.
+  It uses semantic ANSI palettes selected from the public Herdr theme name and
+  terminal fallback metadata, so exact shades still depend on the terminal palette.
 - Herdr's public notification API has no click target/action field, and plugin
   v1 has no API for adding native menu items. Remote attach does not relay
   custom command bindings, so a popup hotkey cannot be installed for this
@@ -28,10 +29,11 @@
 - Multiple simultaneous local clients attached to the same remote Herdr user
   each get their own dashboard workspace; cross-client coordination is out of
   scope.
-- Managed installation still uses Herdr's GitHub checkout flow and therefore
-  needs `git`, `curl`, `tar`, `lsof`, and outbound GitHub access on the remote
-  host. The manifest downloads a checksum-verified prebuilt plugin binary;
-  offline installation is not currently automated.
+- Managed installation first uses Herdr's GitHub checkout flow. When the exact
+  release is unreachable remotely, `hfwd` can transfer a locally downloaded,
+  checksum-verified binary for the remote platform. If GitHub is unavailable
+  locally too, only an exact version/platform artifact from the verified local
+  cache is eligible; a missing artifact is an actionable hard failure.
 - Managed update/uninstall is intentionally refused while a forwarding session
   is active. Linked development checkouts must be managed with Herdr's
   `plugin link`/`plugin unlink` commands rather than the managed installer.
