@@ -452,14 +452,23 @@ mod tests {
     }
 
     #[test]
-    fn validates_payload_and_deduplicates_forward() {
+    fn deduplicates_and_enriches_an_existing_forward() {
         let mut registry = Registry::new(FakeSsh::default());
         registry.port_available = |_| true;
+        registry.now = || 1_722_000_120;
         let (first, created) = registry.create(&request()).unwrap();
         assert!(created);
-        let (duplicate, created) = registry.create(&request()).unwrap();
+        assert_eq!(first.tunnel_opened_at, 1_722_000_120);
+
+        let mut enriched_request = request();
+        enriched_request.process_id = Some(10);
+        enriched_request.server_started_at = Some(1_722_000_000);
+        let (duplicate, created) = registry.create(&enriched_request).unwrap();
+
         assert!(!created);
         assert_eq!(first.id, duplicate.id);
+        assert_eq!(duplicate.process_id, Some(10));
+        assert_eq!(duplicate.server_started_at, Some(1_722_000_000));
         assert!(registry.close_all().is_empty());
         assert!(registry.forwards.is_empty());
     }
@@ -481,20 +490,6 @@ mod tests {
     }
 
     #[test]
-    fn records_server_and_tunnel_start_times() {
-        let mut registry = Registry::new(FakeSsh::default());
-        registry.port_available = |_| true;
-        registry.now = || 1_722_000_120;
-        let mut request = request();
-        request.server_started_at = Some(1_722_000_000);
-
-        let (forward, _) = registry.create(&request).unwrap();
-
-        assert_eq!(forward.server_started_at, Some(1_722_000_000));
-        assert_eq!(forward.tunnel_opened_at, 1_722_000_120);
-    }
-
-    #[test]
     fn paused_forwards_have_no_live_tunnel_timestamp() {
         let mut registry = Registry::new(FakeSsh::default());
         registry.port_available = |_| true;
@@ -504,23 +499,6 @@ mod tests {
 
         assert!(!forward.enabled);
         assert_eq!(forward.tunnel_opened_at, 0);
-    }
-
-    #[test]
-    fn fills_missing_times_on_an_existing_forward() {
-        let mut registry = Registry::new(FakeSsh::default());
-        registry.port_available = |_| true;
-        registry.now = || 1_722_000_120;
-        let (first, _) = registry.create(&request()).unwrap();
-        let mut request = request();
-        request.server_started_at = Some(1_722_000_000);
-
-        let (updated, created) = registry.create(&request).unwrap();
-
-        assert!(!created);
-        assert_eq!(updated.id, first.id);
-        assert_eq!(updated.server_started_at, Some(1_722_000_000));
-        assert_eq!(updated.tunnel_opened_at, 1_722_000_120);
     }
 
     #[test]

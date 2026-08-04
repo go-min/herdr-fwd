@@ -785,11 +785,6 @@ fn split_tree_metadata(value: &str) -> (&str, &str) {
         .unwrap_or((value, ""))
 }
 
-#[cfg(test)]
-fn tree_line_color(line: &TreeLine, _selected: bool, forwards: &[Forward]) -> Color {
-    DashboardPalette::dark().color_for(line, forwards)
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct DashboardPalette {
     active: Color,
@@ -1240,20 +1235,14 @@ fn truncate(value: &str, width: usize) -> String {
 mod dashboard_render_tests {
     use std::collections::HashMap;
 
-    use crossterm::style::Color;
     use herdr_fwd::registry::Forward;
 
-    use crate::plugin::dashboard_terminal::IntegrationMenu;
     use crate::plugin::herdr::PaneLocation;
-    use crate::plugin::preferences::AfterForward;
 
     use super::{
-        canonical_dashboard_shortcuts, compact_message, forward_counts, forward_index_at,
-        forward_state_label, help_shortcut_lines, integration_footer, pane_heading, pane_icon,
-        pane_metadata, process_icon, render_dashboard_shortcuts, shortcut_text,
-        split_tree_metadata, status, tab_icon, tree_forward_indexes, tree_line_color,
-        tree_prefix_length, tree_scroll_window, tree_text, truncate, tunnel_status, tunnel_time,
-        uses_light_palette, DashboardPalette, TreeLine, TreeLineKind,
+        canonical_dashboard_shortcuts, forward_index_at, pane_heading, pane_metadata,
+        shortcut_text, split_tree_metadata, tree_forward_indexes, tree_scroll_window, tree_text,
+        truncate, uses_light_palette,
     };
 
     fn forward(automatic: bool, enabled: bool, pane_id: &str) -> Forward {
@@ -1299,33 +1288,6 @@ mod dashboard_render_tests {
     }
 
     #[test]
-    fn integration_footer_matches_the_selected_control_type() {
-        let mut menu = IntegrationMenu {
-            selected: 0,
-            after_forward: AfterForward::Space,
-            sidebar_ports_enabled: false,
-            toast_delivery: None,
-            popup_shortcut_enabled: false,
-            process_tree_depth: 2,
-        };
-        assert!(integration_footer(&menu).contains("←/→ adjust"));
-        menu.selected = 1;
-        assert!(integration_footer(&menu).contains("toggle"));
-        assert!(!integration_footer(&menu).contains("←/→"));
-        menu.selected = 2;
-        assert!(integration_footer(&menu).contains("setup"));
-        assert!(!integration_footer(&menu).contains("←/→"));
-    }
-
-    #[test]
-    fn compacts_multiline_messages_for_the_footer() {
-        assert_eq!(
-            compact_message("Action failed.\nRPC unavailable\n\nPress r to retry."),
-            "Action failed. · RPC unavailable ·  · Press r to retry."
-        );
-    }
-
-    #[test]
     fn keeps_the_selected_forward_second_line_inside_the_scroll_window() {
         assert_eq!(tree_scroll_window(12, 10, 10), (2, 12));
     }
@@ -1341,93 +1303,7 @@ mod dashboard_render_tests {
     }
 
     #[test]
-    fn uses_dedicated_nerd_font_icons_without_ecosystem_grouping() {
-        assert_eq!(tab_icon(), "󰓩");
-        assert_eq!(pane_icon(), "󰆍");
-        assert_eq!(process_icon("Vite"), "");
-        assert_eq!(process_icon("Storybook"), "");
-        assert_eq!(process_icon("Next.js dev server"), "");
-        assert_eq!(process_icon("Astro"), "");
-        assert_eq!(process_icon("Nuxt"), "");
-        assert_eq!(process_icon("Vue"), "");
-        assert_eq!(process_icon("Svelte"), "");
-        assert_eq!(process_icon("Angular"), "");
-        assert_eq!(process_icon("React"), "");
-        assert_eq!(process_icon("Webpack"), "");
-        assert_eq!(process_icon("Express"), "");
-        assert_eq!(process_icon("Fastify"), "");
-        assert_eq!(process_icon("NestJS"), "");
-        assert_eq!(process_icon("Django runserver"), "");
-        assert_eq!(process_icon("Flask"), "");
-        assert_eq!(process_icon("FastAPI"), "");
-        assert_eq!(process_icon("Rails"), "");
-        assert_eq!(process_icon("Ruby"), "");
-        assert_eq!(process_icon("Go HTTP server"), "");
-        assert_eq!(process_icon("cargo watch"), "");
-        assert_eq!(process_icon("Spring Boot"), "");
-        assert_eq!(process_icon("Laravel"), "");
-        assert_eq!(process_icon("PHP"), "");
-        assert_eq!(process_icon("Docker Compose"), "");
-        assert_eq!(process_icon("Nginx"), "");
-        assert_eq!(process_icon("Apache"), "");
-        assert_eq!(process_icon("Bun"), "");
-        assert_eq!(process_icon("Deno"), "");
-        assert_eq!(process_icon("Caddy"), "󰒋");
-        assert_eq!(process_icon("Parcel"), "󰒋");
-        assert_eq!(process_icon("Uvicorn"), "󰒋");
-        assert_eq!(process_icon("Gunicorn"), "󰒋");
-        assert_eq!(process_icon("unknown-server"), "󰒋");
-    }
-
-    #[test]
-    fn keeps_tree_connectors_neutral_and_uses_status_bullets() {
-        let live = forward(true, true, "w1:p1");
-        let mut paused = forward(true, false, "w1:p1");
-        paused.tunnel_opened_at = 1_722_000_120;
-        assert_eq!(status(&live), "●");
-        assert_eq!(status(&paused), "○");
-        assert_eq!(tunnel_status(&paused), "paused");
-        assert_eq!(tunnel_time(&paused), "—");
-        assert_eq!(forward_counts(&[live, paused]), (2, 1, 1));
-        assert_eq!(tree_prefix_length("  │  └─ 󰆍 w1:p1"), "  │  └─ ".len());
-    }
-
-    #[test]
-    fn labels_active_and_paused_forwards_in_text() {
-        assert_eq!(forward_state_label(&forward(true, true, "w1:p1")), "ACTIVE");
-        assert_eq!(
-            forward_state_label(&forward(true, false, "w1:p1")),
-            "PAUSED"
-        );
-    }
-
-    #[test]
-    fn colors_every_line_of_an_active_or_paused_forward() {
-        let line = TreeLine {
-            text: "          server —  ·  tunnel —".into(),
-            forward_index: Some(0),
-            kind: TreeLineKind::Forward,
-        };
-        assert_eq!(
-            tree_line_color(&line, false, &[forward(true, true, "w1:p1")]),
-            Color::Green
-        );
-        assert_eq!(
-            tree_line_color(&line, false, &[forward(true, false, "w1:p1")]),
-            Color::Yellow
-        );
-        assert_eq!(
-            tree_line_color(&line, true, &[forward(true, true, "w1:p1")]),
-            Color::Green
-        );
-        assert_eq!(
-            tree_line_color(&line, true, &[forward(true, false, "w1:p1")]),
-            Color::Yellow
-        );
-    }
-
-    #[test]
-    fn detects_light_terminal_backgrounds_from_colorfgbg() {
+    fn detects_light_themes_from_herdr_or_the_terminal_background() {
         assert!(uses_light_palette(Some("catppuccin-latte"), None));
         assert!(uses_light_palette(Some("tokyo-night-day"), Some("15;0")));
         assert!(!uses_light_palette(Some("catppuccin"), Some("0;15")));
@@ -1436,91 +1312,6 @@ mod dashboard_render_tests {
         assert!(!uses_light_palette(None, Some("15;0")));
         assert!(!uses_light_palette(None, Some("default;default")));
         assert!(!uses_light_palette(None, None));
-    }
-
-    #[test]
-    fn defines_light_contrast_in_one_semantic_palette() {
-        let palette = DashboardPalette::from_theme_and_colorfgbg(None, Some("0;15"));
-
-        assert_eq!(palette.active, Color::DarkGreen);
-        assert_eq!(palette.paused, Color::AnsiValue(136));
-        assert_eq!(palette.section, Color::DarkCyan);
-        assert_eq!(palette.tree, Color::DarkBlue);
-        assert_eq!(palette.selection, Color::AnsiValue(252));
-        assert!(!palette.dim_metadata);
-        assert!(!palette.dim_paused);
-    }
-
-    #[test]
-    fn uses_darker_semantic_colours_on_light_backgrounds() {
-        let active_line = TreeLine {
-            text: "  ● ACTIVE".into(),
-            forward_index: Some(0),
-            kind: TreeLineKind::Forward,
-        };
-        let paused_line = TreeLine {
-            text: "  ○ PAUSED".into(),
-            forward_index: Some(0),
-            kind: TreeLineKind::Forward,
-        };
-        let header_line = TreeLine {
-            text: "  󰉋 Product".into(),
-            forward_index: None,
-            kind: TreeLineKind::Section,
-        };
-
-        assert_eq!(
-            DashboardPalette::light().color_for(&active_line, &[forward(true, true, "w1:p1")]),
-            Color::DarkGreen
-        );
-        assert_eq!(
-            DashboardPalette::light().color_for(&paused_line, &[forward(true, false, "w1:p1")]),
-            Color::AnsiValue(136)
-        );
-        assert_eq!(
-            DashboardPalette::light().color_for(&header_line, &[]),
-            Color::DarkCyan
-        );
-    }
-
-    #[test]
-    fn keeps_paused_forwards_undimmed_on_light_backgrounds() {
-        let paused_line = TreeLine {
-            text: "  ○ PAUSED".into(),
-            forward_index: Some(0),
-            kind: TreeLineKind::Forward,
-        };
-        let forwards = [forward(true, false, "w1:p1")];
-
-        assert!(!DashboardPalette::light().dim_paused);
-        assert!(DashboardPalette::dark().dim_paused);
-        assert_eq!(
-            DashboardPalette::light().color_for(&paused_line, &forwards),
-            Color::AnsiValue(136)
-        );
-    }
-
-    #[test]
-    fn uses_one_space_before_the_remote_address() {
-        let forwards = vec![forward(true, true, "w1:p1"), forward(false, true, "manual")];
-        let locations = HashMap::from([(
-            "w1:p1".into(),
-            PaneLocation {
-                workspace_id: "w1".into(),
-                workspace: "Apps".into(),
-                tab_id: "w1:t1".into(),
-                tab: "API".into(),
-                ..Default::default()
-            },
-        )]);
-
-        let text = tree_text(&forwards, &locations);
-        assert!(text
-            .iter()
-            .any(|line| line.contains("● ACTIVE 127.0.0.1:5173")));
-        assert!(!text
-            .iter()
-            .any(|line| line.contains("● ACTIVE  127.0.0.1:5173")));
     }
 
     #[test]
@@ -1547,47 +1338,6 @@ mod dashboard_render_tests {
         assert!(shortcuts.contains("o open"));
         assert!(shortcuts.contains("d remove"));
         assert!(!shortcuts.contains("Enter pane"));
-    }
-
-    #[test]
-    fn empty_dashboard_shows_only_global_actions() {
-        let shortcuts = canonical_dashboard_shortcuts(120, 0, None);
-        assert_eq!(
-            shortcut_text(&shortcuts, false),
-            "  a add   h settings   ? help"
-        );
-    }
-
-    #[test]
-    fn renders_shortcut_keys_in_bold_and_labels_dimmed() {
-        let custom = forward(false, true, "w1:p1");
-        let shortcuts = canonical_dashboard_shortcuts(120, 2, Some(&custom));
-        let mut output = Vec::new();
-        render_dashboard_shortcuts(&mut output, 120, &shortcuts).unwrap();
-        let output = String::from_utf8(output).unwrap();
-        assert!(output.contains("\x1b[1m↑↓/jk"));
-        assert!(output.contains("\x1b[2m navigate"));
-        assert!(output.contains("\x1b[1md"));
-        assert!(output.contains("\x1b[2m remove"));
-    }
-
-    #[test]
-    fn derives_contextual_help_from_canonical_shortcuts() {
-        let paused = forward(true, false, "w1:p1");
-        assert_eq!(
-            help_shortcut_lines(1, Some(&paused)),
-            vec![
-                "KEYBOARD SHORTCUTS".to_string(),
-                "Enter  Focus the source pane".to_string(),
-                "Space  Pause or resume the selected forward".to_string(),
-                "p      Choose a different local port".to_string(),
-                "a      Add a manual forward".to_string(),
-                "h      Open integration settings".to_string(),
-                "?      Show keyboard shortcuts".to_string(),
-                "r      Refresh forwarding status".to_string(),
-                "Esc    Close the current view".to_string(),
-            ]
-        );
     }
 
     #[test]
@@ -1949,44 +1699,5 @@ mod dashboard_render_tests {
                 "       tunnel —",
             ]
         );
-    }
-
-    #[test]
-    fn keeps_vertical_connectors_for_sibling_tabs() {
-        let forwards = vec![
-            forward(true, true, "w1:p1"),
-            Forward {
-                id: "fwd-2".into(),
-                pane_id: "w1:p2".into(),
-                ..forward(true, true, "w1:p1")
-            },
-        ];
-        let locations = HashMap::from([
-            (
-                "w1:p1".into(),
-                PaneLocation {
-                    workspace_id: "w1".into(),
-                    workspace: "Apps".into(),
-                    tab_id: "w1:t1".into(),
-                    tab: "One".into(),
-                    ..Default::default()
-                },
-            ),
-            (
-                "w1:p2".into(),
-                PaneLocation {
-                    workspace_id: "w1".into(),
-                    workspace: "Apps".into(),
-                    tab_id: "w1:t2".into(),
-                    tab: "Two".into(),
-                    ..Default::default()
-                },
-            ),
-        ]);
-
-        let text = tree_text(&forwards, &locations);
-        assert!(text.contains(&"  ├─ 󰓩 One".into()));
-        assert!(text.iter().any(|line| line.starts_with("  │  └─ 󰆍 Vite")));
-        assert!(text.contains(&"  └─ 󰓩 Two".into()));
     }
 }

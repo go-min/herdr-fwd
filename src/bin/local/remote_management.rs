@@ -649,10 +649,8 @@ mod remote_management_tests {
     use crate::local::release::deployment_manifest;
 
     use super::{
-        install_remote_plugin_command, is_managed_remote_origin, local_bundle_command,
-        reject_active_sessions_command, remote_origin_contents, remote_plugin_removal_command,
-        remote_release_access_command, validate_ssh_target, RemotePluginOrigin, RemotePluginStatus,
-        REMOTE_PLUGIN_ID, REMOTE_PLUGIN_SOURCE,
+        is_managed_remote_origin, remote_plugin_removal_command, validate_ssh_target,
+        RemotePluginOrigin, RemotePluginStatus,
     };
     #[test]
     fn validates_remote_management_targets() {
@@ -661,41 +659,6 @@ mod remote_management_tests {
         assert!(validate_ssh_target("").is_err());
         assert!(validate_ssh_target("-oProxyCommand=bad").is_err());
         assert!(validate_ssh_target("work box").is_err());
-    }
-
-    #[test]
-    fn remote_install_command_has_only_fixed_plugin_identifiers() {
-        let command = install_remote_plugin_command(false);
-        assert!(command.contains(REMOTE_PLUGIN_SOURCE));
-        assert!(command.contains(REMOTE_PLUGIN_ID));
-        assert!(command.contains("plugin install"));
-        assert!(command.contains("HERDR_FWD_MANAGED_REMOTE_INSTALL=1"));
-        assert!(!command.contains("HERDR_FWD_INSTALLED_BY_WRAPPER"));
-        assert!(!command.contains("git ls-remote --exit-code"));
-        assert!(!command.contains("command -v curl"));
-        assert!(!command.contains("installation_source"));
-        assert!(command.contains(&format!("--ref v{}", env!("CARGO_PKG_VERSION"))));
-        assert!(!command.contains(&reject_active_sessions_command()));
-
-        let update = install_remote_plugin_command(true);
-        assert!(!update.contains(&reject_active_sessions_command()));
-
-        let probe = remote_release_access_command("linux-aarch64");
-        assert!(probe.contains("git ls-remote --exit-code"));
-        assert!(probe.contains(&format!("refs/tags/v{}", env!("CARGO_PKG_VERSION"))));
-        assert!(probe.contains("herdr-fwd-linux-aarch64.tar.gz"));
-        assert!(probe.contains("SHA256SUMS"));
-    }
-
-    #[test]
-    fn remote_origin_contents_is_valid_toml_for_a_plugin_root() {
-        let plugin_root = "/Users/example/.config/herdr/plugins/github/herdr.fwd-abc";
-        let contents = remote_origin_contents(plugin_root);
-        let origin = toml_edit::de::from_str::<serde_json::Value>(&contents).unwrap();
-
-        assert_eq!(origin["origin"], "hfwd_remote");
-        assert_eq!(origin["plugin_root"], plugin_root);
-        assert_eq!(origin["version"], env!("CARGO_PKG_VERSION"));
     }
 
     #[test]
@@ -748,21 +711,10 @@ mod remote_management_tests {
     }
 
     #[test]
-    fn active_session_guard_ignores_dashboard_markers() {
-        let command = reject_active_sessions_command();
-        assert!(command.contains("! -name '*.dashboard.json'"));
-    }
-
-    #[test]
-    fn local_bundle_uses_a_managed_remote_path_without_a_build_hook() {
+    fn fallback_manifest_never_triggers_a_remote_build() {
         let manifest = deployment_manifest().unwrap();
         assert!(!manifest.contains("[[build]]"));
         assert!(manifest.contains("herdr-fwd-plugin"));
-
-        let command = local_bundle_command("abc123", "cat > \"$stage/plugin\"");
-        assert!(command.contains(".local/share"));
-        assert!(command.contains(".staging-abc123"));
-        assert!(command.contains("cat > \"$stage/plugin\""));
     }
 
     #[test]

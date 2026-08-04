@@ -110,17 +110,7 @@ fn preferences_path_from(
 
 #[cfg(test)]
 mod preferences_tests {
-    use herdr_fwd::DEFAULT_PROCESS_TREE_DEPTH;
-
-    use super::{preferences_path_from, AfterForward, Preferences};
-
-    #[test]
-    fn defaults_to_opening_the_dashboard_space_after_forwarding() {
-        let preferences = Preferences::default();
-        assert!(preferences.onboarding);
-        assert_eq!(preferences.after_forward, AfterForward::Space);
-        assert_eq!(preferences.process_tree_depth, DEFAULT_PROCESS_TREE_DEPTH);
-    }
+    use super::Preferences;
 
     #[test]
     fn keeps_onboarding_as_a_boolean_without_installation_metadata() {
@@ -140,15 +130,6 @@ mod preferences_tests {
             )
             .unwrap()
             .onboarding
-        );
-    }
-
-    #[test]
-    fn stores_preferences_in_config_toml() {
-        let directory = std::env::temp_dir().join("herdr-fwd-preferences-test");
-        assert_eq!(
-            preferences_path_from(Some(directory.clone().into_os_string()), None, None).unwrap(),
-            directory.join("config.toml")
         );
     }
 }

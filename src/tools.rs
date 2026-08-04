@@ -254,7 +254,7 @@ mod tests {
             "Storybook"
         );
         assert_eq!(
-            tool_for_text("python3 test-dev-server --server next 4000")
+            tool_for_text("/usr/bin/python3 /home/demo/scripts/test-dev-server --server next 4000")
                 .unwrap()
                 .display,
             "Next.js"

@@ -429,13 +429,15 @@ mod sidebar_config_tests {
     }
 
     #[test]
-    fn adds_the_ports_row_to_an_existing_sidebar_layout() {
-        let config =
-            "# retain this comment\n[ui.sidebar.spaces]\nrows = [\n  [\"workspace\"],\n]\n";
+    fn adds_the_ports_row_idempotently_without_losing_existing_configuration() {
+        let config = "# retain this comment\n[ui.sidebar.spaces]\nrows = [[\"state_icon\", \"workspace\"], [\"branch\", \"git_status\"]]\n";
         let updated = add_ports_row_to_config(config).unwrap();
         assert!(updated.contains("# retain this comment"));
+        assert!(updated.contains("[\"state_icon\", \"workspace\"]"));
+        assert!(updated.contains("[\"branch\", \"git_status\"]"));
         assert!(updated.contains("[\"$port_forward_status\"]"));
         assert!(updated.parse::<toml_edit::DocumentMut>().is_ok());
+        assert_eq!(add_ports_row_to_config(&updated).unwrap(), updated);
     }
 
     #[test]
@@ -451,21 +453,6 @@ mod sidebar_config_tests {
             Some(default_rows),
         )
         .unwrap();
-        assert!(updated.contains("[\"state_icon\", \"workspace\"]"));
-        assert!(updated.contains("[\"branch\", \"git_status\"]"));
-        assert!(updated.contains("[\"$port_forward_status\"]"));
-    }
-
-    #[test]
-    fn does_not_duplicate_the_ports_row() {
-        let config = "[ui.sidebar.spaces]\nrows = [[\"$port_forward_status\"]]\n";
-        assert_eq!(add_ports_row_to_config(config).unwrap(), config);
-    }
-
-    #[test]
-    fn preserves_all_existing_rows_when_adding_ports() {
-        let config = "[ui.sidebar.spaces]\nrows = [[\"state_icon\", \"workspace\"], [\"branch\", \"git_status\"]]\n";
-        let updated = add_ports_row_to_config(config).unwrap();
         assert!(updated.contains("[\"state_icon\", \"workspace\"]"));
         assert!(updated.contains("[\"branch\", \"git_status\"]"));
         assert!(updated.contains("[\"$port_forward_status\"]"));
@@ -508,16 +495,18 @@ mod sidebar_config_tests {
     }
 
     #[test]
-    fn refuses_to_modify_invalid_toml() {
-        let error = add_ports_row_to_config("[ui\nrows = []\n").unwrap_err();
-        assert!(error.contains("refusing to update invalid TOML"));
-    }
-
-    #[test]
-    fn refuses_to_replace_an_incompatible_rows_value() {
-        let error =
-            add_ports_row_to_config("[ui.sidebar.spaces]\nrows = \"not an array\"\n").unwrap_err();
-        assert!(error.contains("ui.sidebar.spaces.rows exists but is not an array"));
+    fn rejects_invalid_or_incompatible_configuration_without_rewriting_it() {
+        for (config, expected) in [
+            ("[ui\nrows = []\n", "refusing to update invalid TOML"),
+            (
+                "[ui.sidebar.spaces]\nrows = \"not an array\"\n",
+                "ui.sidebar.spaces.rows exists but is not an array",
+            ),
+        ] {
+            assert!(add_ports_row_to_config(config)
+                .unwrap_err()
+                .contains(expected));
+        }
     }
 
     #[test]

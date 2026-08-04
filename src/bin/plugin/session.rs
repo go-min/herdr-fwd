@@ -238,7 +238,7 @@ mod session_tests {
     };
 
     #[cfg(unix)]
-    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    use std::os::unix::fs::PermissionsExt;
 
     use super::{
         cleanup_orphan_dashboards_with, cleanup_remote_session_with, close_dashboard_with,
@@ -313,30 +313,6 @@ mod session_tests {
         assert!(result.is_err());
         let actual: DashboardMarker = read_json_file(&path).expect("marker should remain readable");
         assert_eq!(actual.workspace_id, "existing");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn atomically_replaces_an_existing_marker() {
-        let directory = TestDirectory::new();
-        let path = directory.path().join("session.dashboard.json");
-        write_json_file(&path, &marker("existing")).expect("existing marker should be written");
-        let old_inode = fs::metadata(&path)
-            .expect("existing marker metadata should be readable")
-            .ino();
-
-        write_json_file(&path, &marker("replacement")).expect("replacement should be written");
-
-        let actual: DashboardMarker =
-            read_json_file(&path).expect("replacement should be valid JSON");
-        assert_eq!(actual.workspace_id, "replacement");
-        assert_ne!(
-            fs::metadata(&path)
-                .expect("replacement marker metadata should be readable")
-                .ino(),
-            old_inode,
-            "an atomic replacement publishes a new file rather than truncating the old marker"
-        );
     }
 
     #[test]

@@ -816,9 +816,9 @@ mod lifecycle_tests {
 
     use super::{
         automatic_requests_to_create, close_dashboard_with, dashboard_command_with_config,
-        forward_sidebar_token, forwarding_space_status, open_dashboard_space_with,
-        pane_workspace_map, popup_pane_arguments, process_changed, reconcile_forward_requests,
-        workspace_create_arguments, workspace_port_tokens, DashboardMarker, DashboardOperations,
+        open_dashboard_space_with, pane_workspace_map, popup_pane_arguments, process_changed,
+        reconcile_forward_requests, workspace_create_arguments, workspace_port_tokens,
+        DashboardMarker, DashboardOperations,
     };
 
     struct TestDirectory(PathBuf);
@@ -928,32 +928,6 @@ mod lifecycle_tests {
     }
 
     #[test]
-    fn reports_forwarding_space_live_and_paused_counts() {
-        let active = Forward {
-            id: "active".into(),
-            remote_port: 5173,
-            local_port: 5173,
-            remote_host: "127.0.0.1".into(),
-            pane_id: "w1:p1".into(),
-            process: "Vite".into(),
-            detected_url: "http://localhost:5173".into(),
-            automatic: true,
-            enabled: true,
-            server_started_at: None,
-            process_id: None,
-            tunnel_opened_at: 0,
-        };
-        let paused = Forward {
-            enabled: false,
-            ..active.clone()
-        };
-        assert_eq!(
-            forwarding_space_status(&[active, paused]),
-            "1 active · 1 paused"
-        );
-    }
-
-    #[test]
     fn detects_a_process_restart_by_pid_even_when_the_label_is_unchanged() {
         let forward = Forward {
             id: "vite".into(),
@@ -1003,34 +977,6 @@ mod lifecycle_tests {
             &active_processes,
             &active_process_ids
         ));
-    }
-
-    #[test]
-    fn shortens_same_port_forwards_in_the_sidebar() {
-        let forward = Forward {
-            id: "vite".into(),
-            remote_port: 5173,
-            local_port: 5173,
-            remote_host: "127.0.0.1".into(),
-            pane_id: "w1:p1".into(),
-            process: "Vite".into(),
-            detected_url: "http://localhost:5173".into(),
-            automatic: true,
-            enabled: true,
-            server_started_at: None,
-            process_id: None,
-            tunnel_opened_at: 0,
-        };
-        assert_eq!(
-            forwarding_space_status(std::slice::from_ref(&forward)),
-            "1 active"
-        );
-        assert_eq!(forward_sidebar_token(&forward), "→5173");
-        let remapped = Forward {
-            local_port: 5174,
-            ..forward
-        };
-        assert_eq!(forward_sidebar_token(&remapped), "5173→5174");
     }
 
     #[test]
@@ -1100,7 +1046,7 @@ mod lifecycle_tests {
     }
 
     #[test]
-    fn opens_popup_entrypoints_without_cli_only_placement_options() {
+    fn uses_context_safe_herdr_commands_for_dashboard_creation() {
         assert_eq!(
             popup_pane_arguments("dashboard-popup", std::path::Path::new("/tmp/session.json")),
             [
@@ -1117,10 +1063,6 @@ mod lifecycle_tests {
             .map(str::to_owned)
             .to_vec()
         );
-    }
-
-    #[test]
-    fn creates_the_forwarding_space_without_changing_focus() {
         assert_eq!(
             workspace_create_arguments("Port Forwarding"),
             [
@@ -1234,57 +1176,40 @@ mod lifecycle_tests {
     }
 
     #[test]
-    fn closes_a_created_workspace_when_pane_launch_fails() {
-        let directory = TestDirectory::new();
-        let mut operations = TestDashboardOperations::failing(DashboardFailure::PaneRun);
+    fn closes_a_new_workspace_after_any_initialization_failure() {
+        let cases: &[(DashboardFailure, &str, &[&str])] = &[
+            (
+                DashboardFailure::PaneRun,
+                "pane launch failed",
+                &["create", "pane run", "close"],
+            ),
+            (
+                DashboardFailure::Status,
+                "status failed",
+                &["create", "pane run", "status", "close"],
+            ),
+            (
+                DashboardFailure::MarkerWrite,
+                "marker write failed",
+                &["create", "pane run", "status", "marker write", "close"],
+            ),
+        ];
 
-        let error = open_dashboard_space_with(
-            &mut operations,
-            &directory.path().join("session.dashboard.json"),
-            "0 active",
-            "dashboard command",
-        )
-        .expect_err("pane launch should fail");
+        for (failure, expected_error, expected_calls) in cases {
+            let directory = TestDirectory::new();
+            let mut operations = TestDashboardOperations::failing(*failure);
 
-        assert_eq!(error, "pane launch failed");
-        assert_eq!(operations.calls, ["create", "pane run", "close"]);
-    }
+            let error = open_dashboard_space_with(
+                &mut operations,
+                &directory.path().join("session.dashboard.json"),
+                "0 active",
+                "dashboard command",
+            )
+            .expect_err("dashboard initialization should fail");
 
-    #[test]
-    fn closes_a_created_workspace_when_status_reporting_fails() {
-        let directory = TestDirectory::new();
-        let mut operations = TestDashboardOperations::failing(DashboardFailure::Status);
-
-        let error = open_dashboard_space_with(
-            &mut operations,
-            &directory.path().join("session.dashboard.json"),
-            "0 active",
-            "dashboard command",
-        )
-        .expect_err("status reporting should fail");
-
-        assert_eq!(error, "status failed");
-        assert_eq!(operations.calls, ["create", "pane run", "status", "close"]);
-    }
-
-    #[test]
-    fn closes_a_created_workspace_when_marker_persistence_fails() {
-        let directory = TestDirectory::new();
-        let mut operations = TestDashboardOperations::failing(DashboardFailure::MarkerWrite);
-
-        let error = open_dashboard_space_with(
-            &mut operations,
-            &directory.path().join("session.dashboard.json"),
-            "0 active",
-            "dashboard command",
-        )
-        .expect_err("marker persistence should fail");
-
-        assert_eq!(error, "marker write failed");
-        assert_eq!(
-            operations.calls,
-            ["create", "pane run", "status", "marker write", "close"]
-        );
+            assert_eq!(&error, expected_error);
+            assert_eq!(&operations.calls, expected_calls);
+        }
     }
 
     #[test]

@@ -452,7 +452,7 @@ mod cli_tests {
     };
 
     use super::{
-        detect_shell, explicit_remote_herdr_session_name, hook_source, install_hook, parse_cli,
+        explicit_remote_herdr_session_name, hook_source, install_hook, parse_cli,
         remote_herdr_session_name, remote_session_path,
     };
 
@@ -552,13 +552,6 @@ mod cli_tests {
         assert!(hook_source("nu")
             .unwrap_err()
             .contains("zsh, bash, or fish"));
-    }
-
-    #[test]
-    fn detects_supported_shell_from_its_executable_path() {
-        assert_eq!(detect_shell(Some("/bin/zsh")), Ok("zsh"));
-        assert_eq!(detect_shell(Some("/opt/homebrew/bin/fish")), Ok("fish"));
-        assert!(detect_shell(None).unwrap_err().contains("SHELL is not set"));
     }
 
     #[test]

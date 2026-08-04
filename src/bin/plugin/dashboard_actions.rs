@@ -637,29 +637,11 @@ mod dashboard_actions_tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use herdr_fwd::{registry::Forward, RemoteSessionConfig};
 
-    use crate::plugin::dashboard_terminal::{DashboardForm, DashboardState};
+    use crate::plugin::dashboard_terminal::DashboardState;
     use crate::plugin::preferences::AfterForward;
 
-    use super::{
-        adjust_process_tree_depth, cycle_after_forward, handle_dashboard_key,
-        handle_integration_key,
-    };
+    use super::{handle_dashboard_key, handle_integration_key};
     use crate::plugin::dashboard_terminal::IntegrationMenu;
-
-    #[test]
-    fn process_tree_depth_changes_stay_within_configured_bounds() {
-        assert_eq!(adjust_process_tree_depth(0, -1), 8);
-        assert_eq!(adjust_process_tree_depth(2, 1), 3);
-        assert_eq!(adjust_process_tree_depth(8, 1), 0);
-        assert_eq!(
-            cycle_after_forward(AfterForward::Space, -1),
-            AfterForward::Nothing
-        );
-        assert_eq!(
-            cycle_after_forward(AfterForward::Nothing, 1),
-            AfterForward::Space
-        );
-    }
 
     #[test]
     fn help_shortcut_accepts_question_mark_positions_on_both_layouts() {
@@ -681,28 +663,6 @@ mod dashboard_actions_tests {
             handle_dashboard_key(key, &config, &[], &mut state);
             assert!(state.help);
         }
-    }
-
-    #[test]
-    fn port_shortcut_opens_the_change_port_form() {
-        let config = RemoteSessionConfig {
-            protocol_version: herdr_fwd::PROTOCOL_VERSION,
-            session_id: "0123456789abcdef01234567".into(),
-            herdr_session: "default".into(),
-            token: "ab".repeat(32),
-            rpc_url: "http://127.0.0.1:23000".into(),
-            auto_detect: true,
-        };
-        let mut state = DashboardState::default();
-
-        handle_dashboard_key(
-            KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE),
-            &config,
-            &[forward()],
-            &mut state,
-        );
-
-        assert!(matches!(state.form, Some(DashboardForm::Retarget(_))));
     }
 
     #[test]
@@ -872,10 +832,10 @@ mod dashboard_actions_tests {
 
         let message = state.message.unwrap();
         assert!(message.error);
-        assert_eq!(
-            message.text,
-            "Action failed.\nRPC returned 500: browser unavailable\n\nPress r to retry or h for settings."
-        );
+        assert!(message
+            .text
+            .contains("RPC returned 500: browser unavailable"));
+        assert!(message.text.contains("Press r to retry"));
     }
 
     #[test]

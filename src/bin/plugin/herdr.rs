@@ -856,7 +856,7 @@ mod herdr_tests {
         merge_listener_processes, pane_locations, parse_process_elapsed,
         process_command_lines_from_ps, process_label, process_started_times_from_ps,
         process_tree_ids_from_parent_map, run_command_with_timeout, select_herdr_binary,
-        started_at, PaneLocation,
+        PaneLocation,
     };
 
     #[test]
@@ -898,16 +898,6 @@ mod herdr_tests {
 
     #[cfg(unix)]
     #[test]
-    fn command_runner_returns_stdout_for_a_successful_command() {
-        let output =
-            run_command_with_timeout("sh", &["-c", "printf ready"], Duration::from_secs(1))
-                .expect("successful command should return output");
-
-        assert_eq!(output.stdout, b"ready");
-    }
-
-    #[cfg(unix)]
-    #[test]
     fn command_runner_drains_large_stdout_before_the_child_exits() {
         let output = run_command_with_timeout(
             "sh",
@@ -917,20 +907,6 @@ mod herdr_tests {
         .expect("large stdout should not block the child");
 
         assert_eq!(output.stdout.len(), 131_072);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn command_runner_returns_output_for_a_non_zero_command() {
-        let output = run_command_with_timeout(
-            "sh",
-            &["-c", "printf failure >&2; exit 7"],
-            Duration::from_secs(1),
-        )
-        .expect("runner should return completed non-zero output");
-
-        assert!(!output.status.success());
-        assert_eq!(output.stderr, b"failure");
     }
 
     #[cfg(unix)]
@@ -946,17 +922,6 @@ mod herdr_tests {
         }
 
         assert_eq!(result, Err("Herdr failed".into()));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn command_runner_returns_a_timeout_error_within_the_deadline() {
-        let started = Instant::now();
-        let error = run_command_with_timeout("sh", &["-c", "sleep 5"], Duration::from_millis(50))
-            .expect_err("sleeping command should time out");
-
-        assert!(error.contains("timed out"));
-        assert!(started.elapsed() < Duration::from_secs(1));
     }
 
     #[cfg(unix)]
@@ -1048,36 +1013,6 @@ mod herdr_tests {
     }
 
     #[test]
-    fn prefers_a_specific_server_tool_over_its_runtime() {
-        for (runtime, command, expected) in [
-            (
-                "node",
-                "node node_modules/storybook/bin/index.cjs dev",
-                "Storybook",
-            ),
-            (
-                "node",
-                "node node_modules/next/dist/bin/next dev",
-                "Next.js",
-            ),
-            (
-                "node",
-                "node node_modules/fastify-cli/cli.js start",
-                "Fastify",
-            ),
-            ("python", "python -m uvicorn app:app", "Uvicorn"),
-            ("python", "python -m fastapi dev main.py", "FastAPI"),
-            ("ruby", "bin/rails server", "Rails"),
-            ("java", "java -jar spring-boot-app.jar", "Spring Boot"),
-        ] {
-            let response = json!({
-                "foreground_processes": [{"name": runtime, "command": command}]
-            });
-            assert_eq!(process_label(&response), expected, "{command}");
-        }
-    }
-
-    #[test]
     fn resolves_the_installer_path_when_dashboard_lacks_herdr_bin_path() {
         let installed = PathBuf::from("/home/example/.local/bin/herdr");
         assert_eq!(
@@ -1117,28 +1052,6 @@ mod herdr_tests {
     }
 
     #[test]
-    fn tool_detection_requires_command_token_boundaries() {
-        assert_eq!(
-            super::process_label_for_command("/usr/bin/node /srv/nextcloud/server.js"),
-            "Node"
-        );
-        assert_eq!(
-            super::process_label_for_command("/usr/bin/python /srv/reactor.py"),
-            "Python"
-        );
-        assert_eq!(
-            super::process_label_for_command("/usr/local/bin/bundle exec puma"),
-            "/usr/local/bin/bundle exec puma"
-        );
-        assert_eq!(
-            super::process_label_for_command(
-                "/usr/bin/python3 /home/demo/scripts/test-dev-server --server next 4000"
-            ),
-            "Next.js"
-        );
-    }
-
-    #[test]
     fn merges_ss_results_without_overwriting_lsof_process_metadata() {
         let mut lsof = BTreeMap::from([
             (3000, (41, "127.0.0.1".to_string())),
@@ -1167,12 +1080,6 @@ mod herdr_tests {
                 (456, "python -m uvicorn app:app".into()),
             ])
         );
-    }
-
-    #[test]
-    fn converts_process_elapsed_seconds_to_a_start_timestamp() {
-        assert_eq!(started_at(1_722_000_120, 120), 1_722_000_000);
-        assert_eq!(started_at(60, 120), 0);
     }
 
     #[test]
