@@ -96,6 +96,7 @@ fn run() -> Result<(), String> {
         .unwrap_or_else(|_| cli.target.clone())
         .trim()
         .to_string();
+    let herdr_session = remote_herdr_session_name(&cli);
 
     let listener = TcpListener::bind(("127.0.0.1", 0))
         .map_err(|error| format!("failed to bind local companion: {error}"))?;
@@ -108,7 +109,7 @@ fn run() -> Result<(), String> {
     let remote_rpc_port = establish_reverse_rpc(&client, companion_port)?;
     let token = secure_random_hex(32)?;
     let session_id = secure_random_hex(12)?;
-    let remote_path = format!("$HOME/.cache/herdr-fwd/session-{session_id}.json");
+    let remote_path = remote_session_path(&session_id);
     let remote_config = RemoteSessionConfig {
         protocol_version: PROTOCOL_VERSION,
         session_id: session_id.clone(),
@@ -126,8 +127,8 @@ fn run() -> Result<(), String> {
         wrapper_pid: std::process::id(),
         registry: Mutex::new(Registry::new(client.clone())),
         state_path: state_path.clone(),
-        manual_path: manual_forwards_path(&host_key)?,
-        paused_path: paused_forwards_path(&host_key)?,
+        manual_path: manual_forwards_path(&host_key, &herdr_session)?,
+        paused_path: paused_forwards_path(&host_key, &herdr_session)?,
         last_heartbeat: Mutex::new(None),
         open_new: cli.open,
     });
@@ -168,23 +169,37 @@ fn run() -> Result<(), String> {
 }
 
 fn wake_remote_watcher(client: &SshClient, cli: &Cli) {
-    let selector = cli
-        .herdr_arguments
-        .windows(2)
-        .find(|arguments| arguments[0] == "--session")
-        .map(|arguments| format!("--session {} ", shell_quote(&arguments[1])))
-        .or_else(|| {
-            cli.herdr_arguments.iter().find_map(|argument| {
-                argument
-                    .strip_prefix("--session=")
-                    .map(|session| format!("--session {} ", shell_quote(session)))
-            })
-        })
+    let selector = explicit_remote_herdr_session_name(cli)
+        .map(|session| format!("--session {} ", shell_quote(session)))
         .unwrap_or_default();
     let command = format!(
         "export PATH=\"$HOME/.local/bin:$PATH\"; herdr {selector}plugin action invoke herdr.fwd.wake >/dev/null 2>&1 || true"
     );
     let _ = client.remote_command(&command);
+}
+
+fn remote_session_path(session_id: &str) -> String {
+    format!("$HOME/.cache/herdr-fwd/session-{session_id}.json")
+}
+
+fn remote_herdr_session_name(cli: &Cli) -> String {
+    explicit_remote_herdr_session_name(cli)
+        .unwrap_or("default")
+        .to_owned()
+}
+
+fn explicit_remote_herdr_session_name(cli: &Cli) -> Option<&str> {
+    cli.herdr_arguments
+        .windows(2)
+        .find(|arguments| arguments[0] == "--session")
+        .map(|arguments| arguments[1].as_str())
+        .or_else(|| {
+            cli.herdr_arguments.iter().find_map(|argument| {
+                argument
+                    .strip_prefix("--session=")
+                    .filter(|session| !session.is_empty())
+            })
+        })
 }
 
 fn parse_cli(arguments: &[String]) -> Result<Cli, String> {
@@ -431,7 +446,10 @@ mod cli_tests {
         sync::atomic::{AtomicU64, Ordering},
     };
 
-    use super::{detect_shell, hook_source, install_hook, parse_cli};
+    use super::{
+        detect_shell, explicit_remote_herdr_session_name, hook_source, install_hook, parse_cli,
+        remote_herdr_session_name, remote_session_path,
+    };
 
     static TEST_DIRECTORY_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -472,6 +490,38 @@ mod cli_tests {
         assert!(cli.open);
         assert!(cli.verbose);
         assert_eq!(cli.herdr_arguments, ["--session", "agents"]);
+    }
+
+    #[test]
+    fn writes_remote_session_into_the_plugin_runtime_cache_directory() {
+        assert_eq!(
+            remote_session_path("0123456789abcdef"),
+            "$HOME/.cache/herdr-fwd/session-0123456789abcdef.json"
+        );
+    }
+
+    #[test]
+    fn selects_the_remote_herdr_session_for_persistent_forwards() {
+        let default = parse_cli(&["workbox".into()]).unwrap();
+        let named = parse_cli(&[
+            "workbox".into(),
+            "--".into(),
+            "--session".into(),
+            "review".into(),
+        ])
+        .unwrap();
+        let equals =
+            parse_cli(&["workbox".into(), "--".into(), "--session=preview".into()]).unwrap();
+        let empty = parse_cli(&["workbox".into(), "--".into(), "--session=".into()]).unwrap();
+
+        assert_eq!(remote_herdr_session_name(&default), "default");
+        assert_eq!(remote_herdr_session_name(&named), "review");
+        assert_eq!(remote_herdr_session_name(&equals), "preview");
+        assert_eq!(remote_herdr_session_name(&empty), "default");
+        assert_eq!(explicit_remote_herdr_session_name(&default), None);
+        assert_eq!(explicit_remote_herdr_session_name(&named), Some("review"));
+        assert_eq!(explicit_remote_herdr_session_name(&equals), Some("preview"));
+        assert_eq!(explicit_remote_herdr_session_name(&empty), None);
     }
 
     #[test]

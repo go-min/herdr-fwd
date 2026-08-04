@@ -17,7 +17,8 @@ use crate::plugin::{
     dashboard_terminal::dashboard,
     herdr::{
         collect_array_values, collect_string_values, first_string_value, herdr_json, herdr_output,
-        loopback_listener_processes, process_label, process_started_at, process_tree_ids,
+        loopback_listener_processes, process_command_lines, process_label,
+        process_label_for_command, process_started_at, process_tree_ids,
         report_workspace_port_forward_status,
     },
     notifications::notify_changes,
@@ -318,11 +319,20 @@ fn process_session(path: &Path) -> Result<(), String> {
         );
         let listeners = loopback_listener_processes(&process_ids)?;
         let ports = listeners.keys().copied().collect::<Vec<_>>();
+        let listener_process_ids = listeners
+            .values()
+            .map(|(process_id, _)| *process_id)
+            .collect::<Vec<_>>();
+        let listener_commands = process_command_lines(&listener_process_ids).unwrap_or_default();
         active_ports.insert(
             pane_id.clone(),
             ports.iter().copied().collect::<HashSet<_>>(),
         );
         for (port, (process_id, remote_host)) in listeners {
+            let listener_process = listener_commands
+                .get(&process_id)
+                .map(|command| process_label_for_command(command))
+                .unwrap_or_else(|| process.clone());
             let detected_url_host = if remote_host == "::1" {
                 "[::1]".to_string()
             } else {
@@ -333,7 +343,7 @@ fn process_session(path: &Path) -> Result<(), String> {
                 preferred_local_port: port,
                 remote_host,
                 pane_id: pane_id.clone(),
-                process: process.clone(),
+                process: listener_process,
                 detected_url: format!("http://{detected_url_host}:{port}/"),
                 automatic: true,
                 server_started_at: process_started_at(process_id),
@@ -411,14 +421,14 @@ fn process_changed(
     active_processes: &HashMap<String, String>,
     active_process_ids: &HashMap<String, HashSet<u32>>,
 ) -> bool {
+    if let Some(process_id) = forward.process_id {
+        return !active_process_ids
+            .get(&forward.pane_id)
+            .is_some_and(|process_ids| process_ids.contains(&process_id));
+    }
     active_processes
         .get(&forward.pane_id)
         .is_some_and(|process| process != &forward.process)
-        || forward.process_id.is_some_and(|process_id| {
-            !active_process_ids
-                .get(&forward.pane_id)
-                .is_some_and(|process_ids| process_ids.contains(&process_id))
-        })
 }
 
 fn collect_pane_workspaces(value: &Value, output: &mut HashMap<String, String>) {
@@ -847,6 +857,32 @@ mod lifecycle_tests {
         let active_process_ids = HashMap::from([("w1:p1".into(), HashSet::from([42]))]);
 
         assert!(process_changed(
+            &forward,
+            &active_processes,
+            &active_process_ids
+        ));
+    }
+
+    #[test]
+    fn keeps_a_listener_forward_when_its_specific_label_differs_from_the_runtime() {
+        let forward = Forward {
+            id: "storybook".into(),
+            remote_port: 6006,
+            local_port: 6006,
+            remote_host: "127.0.0.1".into(),
+            pane_id: "w1:p1".into(),
+            process: "Storybook".into(),
+            detected_url: "http://localhost:6006".into(),
+            automatic: true,
+            enabled: true,
+            server_started_at: None,
+            process_id: Some(42),
+            tunnel_opened_at: 0,
+        };
+        let active_processes = HashMap::from([("w1:p1".into(), "Node".into())]);
+        let active_process_ids = HashMap::from([("w1:p1".into(), HashSet::from([42]))]);
+
+        assert!(!process_changed(
             &forward,
             &active_processes,
             &active_process_ids

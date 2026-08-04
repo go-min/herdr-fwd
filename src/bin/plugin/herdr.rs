@@ -18,6 +18,47 @@ use std::os::unix::process::CommandExt;
 
 pub(crate) const RECONCILIATION_COMMAND_TIMEOUT: Duration = Duration::from_secs(2);
 
+const SERVER_TOOLS: &[(&str, &str)] = &[
+    ("storybook", "Storybook"),
+    ("next", "Next.js"),
+    ("astro", "Astro"),
+    ("nuxt", "Nuxt"),
+    ("svelte", "Svelte"),
+    ("angular", "Angular"),
+    ("react", "React"),
+    ("webpack", "Webpack"),
+    ("vite", "Vite"),
+    ("parcel", "Parcel"),
+    ("express", "Express"),
+    ("fastify", "Fastify"),
+    ("nest", "NestJS"),
+    ("django", "Django"),
+    ("fastapi", "FastAPI"),
+    ("flask", "Flask"),
+    ("uvicorn", "Uvicorn"),
+    ("gunicorn", "Gunicorn"),
+    ("rails", "Rails"),
+    ("spring", "Spring Boot"),
+    ("laravel", "Laravel"),
+    ("artisan", "Laravel"),
+    ("nginx", "Nginx"),
+    ("caddy", "Caddy"),
+    ("apache", "Apache"),
+];
+
+const RUNTIMES: &[(&str, &str)] = &[
+    ("bun", "Bun"),
+    ("deno", "Deno"),
+    ("node", "Node"),
+    ("python", "Python"),
+    ("ruby", "Ruby"),
+    ("cargo", "Rust"),
+    ("rust", "Rust"),
+    ("java", "Java"),
+    ("php", "PHP"),
+    ("docker", "Docker"),
+];
+
 pub(crate) fn run_command_with_timeout(
     program: impl AsRef<std::ffi::OsStr>,
     arguments: &[&str],
@@ -185,6 +226,19 @@ pub(crate) fn loopback_listener_processes(
             ));
         }
     }
+    #[cfg(target_os = "linux")]
+    if ports.is_empty() && !process_ids.is_empty() {
+        if let Ok(output) =
+            run_command_with_timeout("ss", &["-ltnp"], RECONCILIATION_COMMAND_TIMEOUT)
+        {
+            if output.status.success() {
+                ports.extend(loopback_listener_processes_from_ss(
+                    &String::from_utf8_lossy(&output.stdout),
+                    process_ids,
+                ));
+            }
+        }
+    }
     Ok(ports)
 }
 
@@ -215,6 +269,82 @@ pub(crate) fn loopback_listener_processes_from_lsof(output: &str) -> BTreeMap<u1
         }
     }
     ports
+}
+
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn loopback_listener_processes_from_ss(
+    output: &str,
+    process_ids: &[u32],
+) -> BTreeMap<u16, (u32, String)> {
+    let process_ids = process_ids.iter().copied().collect::<HashSet<_>>();
+    let mut ports = BTreeMap::new();
+    for line in output.lines() {
+        let Some(endpoint) = line.split_whitespace().nth(3) else {
+            continue;
+        };
+        let Some((host, port)) = endpoint.rsplit_once(':') else {
+            continue;
+        };
+        let host = host.trim_matches(['[', ']']);
+        if !matches!(host, "127.0.0.1" | "::1") {
+            continue;
+        }
+        let (Ok(port), Some(process_id)) = (
+            port.parse::<u16>(),
+            line.split("pid=")
+                .skip(1)
+                .filter_map(|value| {
+                    value
+                        .split_once(',')
+                        .and_then(|(value, _)| value.parse::<u32>().ok())
+                })
+                .find(|process_id| process_ids.contains(process_id)),
+        ) else {
+            continue;
+        };
+        if port != 0 {
+            ports.entry(port).or_insert((process_id, host.into()));
+        }
+    }
+    ports
+}
+
+pub(crate) fn process_command_lines(process_ids: &[u32]) -> Result<HashMap<u32, String>, String> {
+    if process_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let process_ids = process_ids
+        .iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    let output = run_command_with_timeout(
+        "ps",
+        &["-o", "pid=,command=", "-p", &process_ids],
+        RECONCILIATION_COMMAND_TIMEOUT,
+    )
+    .map_err(|error| format!("failed to inspect listener commands: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "failed to inspect listener commands: ps exited with {}",
+            output.status
+        ));
+    }
+    Ok(process_command_lines_from_ps(&String::from_utf8_lossy(
+        &output.stdout,
+    )))
+}
+
+pub(crate) fn process_command_lines_from_ps(output: &str) -> HashMap<u32, String> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim_start();
+            let (process_id, command) = line.split_once(char::is_whitespace)?;
+            Some((process_id.parse().ok()?, command.trim_start().to_string()))
+        })
+        .filter(|(_, command)| !command.is_empty())
+        .collect()
 }
 
 pub(crate) fn process_started_at(process_id: u32) -> Option<u64> {
@@ -347,6 +477,7 @@ pub(crate) struct PaneLocation {
     pub(crate) tab_id: String,
     pub(crate) tab: String,
     pub(crate) tab_number: u64,
+    pub(crate) pane_label: Option<String>,
 }
 
 impl Default for PaneLocation {
@@ -358,6 +489,7 @@ impl Default for PaneLocation {
             tab_id: String::new(),
             tab: String::new(),
             tab_number: u64::MAX,
+            pane_label: None,
         }
     }
 }
@@ -369,7 +501,7 @@ pub(crate) fn pane_locations(snapshot: &Value) -> HashMap<String, PaneLocation> 
     collect_location_records(snapshot, &mut workspaces, &mut tabs, &mut panes);
     panes
         .into_iter()
-        .map(|(pane_id, workspace_id, tab_id)| {
+        .map(|(pane_id, workspace_id, tab_id, pane_label)| {
             let (workspace, workspace_number) = workspaces
                 .get(&workspace_id)
                 .cloned()
@@ -387,6 +519,7 @@ pub(crate) fn pane_locations(snapshot: &Value) -> HashMap<String, PaneLocation> 
                     tab_id,
                     tab,
                     tab_number,
+                    pane_label,
                 },
             )
         })
@@ -397,7 +530,7 @@ fn collect_location_records(
     value: &Value,
     workspaces: &mut HashMap<String, (String, u64)>,
     tabs: &mut HashMap<String, (String, u64)>,
-    panes: &mut Vec<(String, String, String)>,
+    panes: &mut Vec<(String, String, String, Option<String>)>,
 ) {
     match value {
         Value::Object(object) => {
@@ -440,7 +573,18 @@ fn collect_location_records(
                 object.get("workspace_id").and_then(Value::as_str),
                 object.get("tab_id").and_then(Value::as_str),
             ) {
-                panes.push((pane_id.into(), workspace_id.into(), tab_id.into()));
+                let pane_label = object
+                    .get("label")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|label| !label.is_empty())
+                    .map(str::to_owned);
+                panes.push((
+                    pane_id.into(),
+                    workspace_id.into(),
+                    tab_id.into(),
+                    pane_label,
+                ));
             }
             for value in object.values() {
                 collect_location_records(value, workspaces, tabs, panes);
@@ -456,30 +600,50 @@ fn collect_location_records(
 }
 
 pub(crate) fn process_label(value: &Value) -> String {
-    for key in ["process_name", "name", "command"] {
-        if let Some(label) = first_string_value(value, key) {
-            let label = herdr_fwd::detect::sanitize_display_text(&label);
-            if label.is_empty() {
-                continue;
-            }
-            let lower = label.to_ascii_lowercase();
-            for (needle, display) in [
-                ("vite", "Vite"),
-                ("next", "Next.js"),
-                ("astro", "Astro"),
-                ("storybook", "Storybook"),
-                ("bun", "Bun"),
-                ("deno", "Deno"),
-                ("node", "Node"),
-            ] {
-                if lower.contains(needle) {
-                    return display.into();
-                }
-            }
-            return label.chars().take(128).collect();
-        }
+    process_label_from_strings(
+        ["process_name", "name", "command"]
+            .into_iter()
+            .flat_map(|key| collect_string_values(value, key)),
+    )
+}
+
+pub(crate) fn process_label_for_command(command: &str) -> String {
+    process_label_from_strings([command.to_string()])
+}
+
+fn process_label_from_strings(labels: impl IntoIterator<Item = String>) -> String {
+    let labels = labels
+        .into_iter()
+        .map(|label| herdr_fwd::detect::sanitize_display_text(&label))
+        .filter(|label| !label.is_empty())
+        .collect::<Vec<_>>();
+    let normalized = labels
+        .iter()
+        .map(|label| label.to_ascii_lowercase())
+        .collect::<Vec<_>>();
+
+    if let Some(display) = matching_tool_label(&normalized, SERVER_TOOLS)
+        .or_else(|| matching_tool_label(&normalized, RUNTIMES))
+    {
+        return display.into();
     }
-    "dev server".into()
+    if normalized
+        .iter()
+        .any(|label| label == "go" || label.contains("golang") || label.starts_with("go "))
+    {
+        return "Go".into();
+    }
+    labels
+        .first()
+        .map(|label| label.chars().take(128).collect())
+        .unwrap_or_else(|| "dev server".into())
+}
+
+fn matching_tool_label<'a>(labels: &[String], tools: &'a [(&str, &'a str)]) -> Option<&'a str> {
+    tools
+        .iter()
+        .find(|(needle, _)| labels.iter().any(|label| label.contains(needle)))
+        .map(|(_, display)| *display)
 }
 
 pub(crate) fn collect_string_values(value: &Value, key: &str) -> Vec<String> {
@@ -665,7 +829,7 @@ fn herdr_socket_path() -> Result<std::ffi::OsString, String> {
 #[cfg(test)]
 mod herdr_tests {
     use std::{
-        collections::BTreeMap,
+        collections::{BTreeMap, HashMap},
         ffi::OsString,
         fs,
         path::PathBuf,
@@ -677,9 +841,10 @@ mod herdr_tests {
 
     use super::{
         collect_array_values, collect_string_values, herdr_output,
-        loopback_listener_processes_from_lsof, pane_locations, parse_process_elapsed,
-        process_label, process_tree_ids_from_parent_map, run_command_with_timeout,
-        select_herdr_binary, started_at, PaneLocation,
+        loopback_listener_processes_from_lsof, loopback_listener_processes_from_ss, pane_locations,
+        parse_process_elapsed, process_command_lines_from_ps, process_label,
+        process_tree_ids_from_parent_map, run_command_with_timeout, select_herdr_binary,
+        started_at, PaneLocation,
     };
 
     #[test]
@@ -862,6 +1027,36 @@ mod herdr_tests {
     }
 
     #[test]
+    fn prefers_a_specific_server_tool_over_its_runtime() {
+        for (runtime, command, expected) in [
+            (
+                "node",
+                "node node_modules/storybook/bin/index.cjs dev",
+                "Storybook",
+            ),
+            (
+                "node",
+                "node node_modules/next/dist/bin/next dev",
+                "Next.js",
+            ),
+            (
+                "node",
+                "node node_modules/fastify-cli/cli.js start",
+                "Fastify",
+            ),
+            ("python", "python -m uvicorn app:app", "Uvicorn"),
+            ("python", "python -m fastapi dev main.py", "FastAPI"),
+            ("ruby", "bin/rails server", "Rails"),
+            ("java", "java -jar spring-boot-app.jar", "Spring Boot"),
+        ] {
+            let response = json!({
+                "foreground_processes": [{"name": runtime, "command": command}]
+            });
+            assert_eq!(process_label(&response), expected, "{command}");
+        }
+    }
+
+    #[test]
     fn resolves_the_installer_path_when_dashboard_lacks_herdr_bin_path() {
         let installed = PathBuf::from("/home/example/.local/bin/herdr");
         assert_eq!(
@@ -884,6 +1079,31 @@ mod herdr_tests {
                 (3000, (456, "localhost".into())),
                 (4000, (789, "::1".into())),
                 (5173, (123, "127.0.0.1".into())),
+            ])
+        );
+    }
+
+    #[test]
+    fn maps_loopback_listener_processes_from_ss_when_lsof_omits_them() {
+        let output = "State  Recv-Q Send-Q Local Address:Port Peer Address:PortProcess\nLISTEN 0      511        127.0.0.1:4000      0.0.0.0:*    users:((\"next-server (v1\",pid=679946,fd=24))\nLISTEN 0      511            [::1]:4001         [::]:*    users:((\"node\",pid=42,fd=18))\nLISTEN 0      511               *:4002            *:*    users:((\"node\",pid=43,fd=18))\n";
+        assert_eq!(
+            loopback_listener_processes_from_ss(output, &[679946, 42]),
+            BTreeMap::from([
+                (4000, (679946, "127.0.0.1".into())),
+                (4001, (42, "::1".into())),
+            ])
+        );
+    }
+
+    #[test]
+    fn maps_listener_process_ids_to_their_full_commands() {
+        let output =
+            "  123 node node_modules/storybook/bin/index.cjs dev\n456 python -m uvicorn app:app\n";
+        assert_eq!(
+            process_command_lines_from_ps(output),
+            HashMap::from([
+                (123, "node node_modules/storybook/bin/index.cjs dev".into()),
+                (456, "python -m uvicorn app:app".into()),
             ])
         );
     }
@@ -921,6 +1141,7 @@ mod herdr_tests {
                 tab_id: "w1:t2".into(),
                 tab: "Tooling".into(),
                 tab_number: 2,
+                pane_label: Some("server".into()),
             })
         );
     }

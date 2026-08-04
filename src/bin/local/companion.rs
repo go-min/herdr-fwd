@@ -210,25 +210,39 @@ impl<S: Ssh> CompanionState<S> {
     }
 }
 
-pub(crate) fn manual_forwards_path(host: &str) -> Result<PathBuf, String> {
-    persistent_forwards_path(host, "manual")
+pub(crate) fn manual_forwards_path(host: &str, herdr_session: &str) -> Result<PathBuf, String> {
+    persistent_forwards_path(host, herdr_session, "manual")
 }
 
-pub(crate) fn paused_forwards_path(host: &str) -> Result<PathBuf, String> {
-    persistent_forwards_path(host, "paused")
+pub(crate) fn paused_forwards_path(host: &str, herdr_session: &str) -> Result<PathBuf, String> {
+    persistent_forwards_path(host, herdr_session, "paused")
 }
 
-fn persistent_forwards_path(host: &str, kind: &str) -> Result<PathBuf, String> {
+fn persistent_forwards_path(
+    host: &str,
+    herdr_session: &str,
+    kind: &str,
+) -> Result<PathBuf, String> {
     let home = env::var_os("HOME").ok_or_else(|| "HOME is not set".to_string())?;
     let directory = PathBuf::from(home).join(".config/herdr-fwd");
     std::fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
-    Ok(directory.join(format!(
-        "{kind}-{}.json",
-        host.as_bytes()
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>()
-    )))
+    Ok(directory.join(persistent_forwards_file_name(host, herdr_session, kind)))
+}
+
+fn persistent_forwards_file_name(host: &str, herdr_session: &str, kind: &str) -> String {
+    format!(
+        "{kind}-{}-{}.json",
+        persistent_key_component(host),
+        persistent_key_component(herdr_session),
+    )
+}
+
+fn persistent_key_component(value: &str) -> String {
+    value
+        .as_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 pub(crate) fn spawn_server(
@@ -576,6 +590,17 @@ mod companion_tests {
                 .push(format!("cancel:{local}:{host}:{remote}"));
             Ok(())
         }
+    }
+
+    #[test]
+    fn persistent_forwards_are_scoped_to_the_remote_herdr_session() {
+        let default_manual = persistent_forwards_file_name("demo-host", "default", "manual");
+        let review_manual = persistent_forwards_file_name("demo-host", "review", "manual");
+        let default_paused = persistent_forwards_file_name("demo-host", "default", "paused");
+        let review_paused = persistent_forwards_file_name("demo-host", "review", "paused");
+
+        assert_ne!(default_manual, review_manual);
+        assert_ne!(default_paused, review_paused);
     }
 
     fn raw_request(address: &str, request: &str) -> String {

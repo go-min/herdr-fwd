@@ -49,7 +49,7 @@ and temporary-file cleanup.
 
 Session documents now carry an explicit protocol version and reject unknown or
 unsupported versions. Both local and remote Herdr are checked against the
-supported `>=0.7.5,<0.8.0` range before attach. Companion, plugin, and dashboard
+supported `>=0.8.0,<0.9.0` range before attach. Companion, plugin, and dashboard
 responses have size limits, untrusted terminal metadata is sanitized, and URL
 payload validation requires a matching HTTP(S) loopback address and port.
 

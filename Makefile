@@ -33,7 +33,7 @@ $(error usage: run, attach, and lima-run must be invoked separately)
 endif
 endif
 
-.PHONY: help fmt fmt-check lint markdown-check markdown-fix deps-check test build package package-smoke release-check ci manifest-check scripts-check \
+.PHONY: help fmt fmt-check lint markdown-check markdown-fix deps-check test build demo package package-smoke release-check ci manifest-check scripts-check \
 	install uninstall run attach serve lima-up lima-run lima-down lima-destroy \
 	lima-status lima-shell
 
@@ -78,13 +78,22 @@ test: ## Core|Run unit and integration tests
 build: ## Core|Build optimized local binaries
 	$(CARGO) build --locked --release --bins
 
+demo: build lima-up ## Core|Record the README product GIFs
+	vhs .github/assets/demo/overview-dark.tape
+	vhs .github/assets/demo/overview-light.tape
+	vhs .github/assets/demo/dashboard-dark.tape
+	vhs .github/assets/demo/dashboard-light.tape
+	vhs .github/assets/demo/settings-dark.tape
+	vhs .github/assets/demo/settings-light.tape
+
 manifest-check:
 	python3 scripts/check-manifest.py
 
 scripts-check:
 	sh -n install.sh scripts/install-plugin-binary.sh scripts/package-release.sh scripts/check-release.sh \
 		scripts/render-homebrew-formula.sh scripts/test-homebrew-formula.sh scripts/test-release-package.sh \
-		uninstall.sh scripts/test-server.sh
+		uninstall.sh scripts/test-server.sh .github/assets/demo/herdr
+	bash -n .github/assets/demo/setup.sh .github/assets/demo/overview.sh
 	sh scripts/test-homebrew-formula.sh
 	PYTHONPYCACHEPREFIX="$${TMPDIR:-/tmp}/herdr-fwd-pycache" python3 -m py_compile \
 		scripts/check-manifest.py scripts/test-dev-server

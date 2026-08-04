@@ -2,7 +2,7 @@
 
 - Herdr does not expose its private ControlPath or a port-forward API. The
   wrapper owns a separate SSH master; ssh-agent/keychain is recommended.
-- Compatibility is intentionally bounded to Herdr >=0.7.5 and <0.8.0 because
+- Compatibility is intentionally bounded to Herdr >=0.8.0 and <0.9.0 because
   pre-1.0 minor releases may change the plugin or socket contract. A new Herdr
   minor line must be validated before this guard is widened.
 - Password-only SSH may authenticate separately for Herdr and the companion.

@@ -70,19 +70,34 @@ provision() {
     if ! command -v deno >/dev/null 2>&1; then
       curl -fsSL https://deno.land/install.sh | DENO_INSTALL=\$HOME/.local sh
     fi
-    if ! command -v herdr >/dev/null 2>&1; then
-      curl -fsSL https://herdr.dev/install.sh | sh
+    herdr_version=0.8.0
+    herdr_asset=herdr-linux-aarch64
+    herdr_sha256=f647ac66468d9efbc642fe534fb284468f0aea60641606fc008dfc0d82a3ca87
+    case \$(uname -m) in
+      aarch64|arm64) ;;
+      *)
+        printf '%s\\n' \"unsupported Lima guest architecture for Herdr \$herdr_version: \$(uname -m)\" >&2
+        exit 1
+        ;;
+    esac
+    if ! herdr --version 2>/dev/null | grep -Fx \"herdr \$herdr_version\" >/dev/null; then
+      herdr_download=\$(mktemp)
+      trap 'rm -f "\$herdr_download"' EXIT HUP INT TERM
+      curl -fsSL \"https://github.com/herdrdev/herdr/releases/download/v\$herdr_version/\$herdr_asset\" -o \"\$herdr_download\"
+      printf '%s  %s\\n' \"\$herdr_sha256\" \"\$herdr_download\" | sha256sum -c -
+      install -m 755 \"\$herdr_download\" \"\$HOME/.local/bin/herdr\"
+      rm -f "\$herdr_download"
+      trap - EXIT HUP INT TERM
     fi
     cd '$guest_home'
-    scripts/test-dev-server --prepare
     CARGO_BUILD_JOBS=1 \
       CARGO_PROFILE_RELEASE_LTO=false \
       CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 \
       cargo build --locked --release --bin herdr-fwd-plugin
+    scripts/test-dev-server --prepare
     herdr plugin link '$guest_home'
-    # Herdr 0.7.5 may persist the enabled state and still return ENOENT while
-    # trying to notify a server that has not started yet. Accept that narrow
-    # case only after confirming the registry reports the enabled state.
+    # A stopped server may return ENOENT while the enabled state is already
+    # persisted. Accept that narrow case only after confirming the registry.
     if ! herdr plugin enable herdr.fwd; then
       herdr plugin list | grep -F 'herdr.fwd' | grep -F 'enabled' >/dev/null
     fi

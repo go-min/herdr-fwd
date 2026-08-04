@@ -92,7 +92,7 @@ pub(crate) fn handle_dashboard_key_with_session_path(
         KeyCode::Char(_) if is_shortcut(key, 'e') => {
             toggle_selected_forward(config, forwards, state);
         }
-        KeyCode::Char(_) if is_shortcut(key, 'c') => {
+        KeyCode::Char(_) if is_shortcut(key, 'p') => {
             let Some(forward) = forwards.get(state.selected) else {
                 state.show_message("Press a to add the first forward", true);
                 return;
@@ -637,7 +637,7 @@ mod dashboard_actions_tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use herdr_fwd::{registry::Forward, RemoteSessionConfig};
 
-    use crate::plugin::dashboard_terminal::DashboardState;
+    use crate::plugin::dashboard_terminal::{DashboardForm, DashboardState};
     use crate::plugin::preferences::AfterForward;
 
     use super::{
@@ -680,6 +680,27 @@ mod dashboard_actions_tests {
             handle_dashboard_key(key, &config, &[], &mut state);
             assert!(state.help);
         }
+    }
+
+    #[test]
+    fn port_shortcut_opens_the_change_port_form() {
+        let config = RemoteSessionConfig {
+            protocol_version: 1,
+            session_id: "0123456789abcdef01234567".into(),
+            token: "ab".repeat(32),
+            rpc_url: "http://127.0.0.1:23000".into(),
+            auto_detect: true,
+        };
+        let mut state = DashboardState::default();
+
+        handle_dashboard_key(
+            KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE),
+            &config,
+            &[forward()],
+            &mut state,
+        );
+
+        assert!(matches!(state.form, Some(DashboardForm::Retarget(_))));
     }
 
     #[test]

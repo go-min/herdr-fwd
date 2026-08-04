@@ -39,6 +39,17 @@ pub(crate) fn dashboard_setup_status() -> Result<DashboardSetupStatus, String> {
     Ok(dashboard_setup_status_from_document(&document))
 }
 
+pub(crate) fn configured_theme_name() -> Result<Option<String>, String> {
+    let path = herdr_config_path()?;
+    let config = match fs::read_to_string(&path) {
+        Ok(config) => config,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("failed to read {}: {error}", path.display())),
+    };
+    let document = parse_config(&config)?;
+    Ok(theme_name_from_document(&document))
+}
+
 pub(crate) fn enable_herdr_notifications() -> Result<DashboardSetupStatus, String> {
     update_config(update_herdr_notifications)?;
     dashboard_setup_status()
@@ -376,6 +387,15 @@ fn dashboard_setup_status_from_document(document: &DocumentMut) -> DashboardSetu
     }
 }
 
+fn theme_name_from_document(document: &DocumentMut) -> Option<String> {
+    document
+        .get("theme")
+        .and_then(Item::as_table_like)
+        .and_then(|theme| theme.get("name"))
+        .and_then(Item::as_str)
+        .map(str::to_owned)
+}
+
 fn table_at<'a>(table: &'a Table, path: &[&str]) -> Option<&'a Table> {
     path.iter()
         .try_fold(table, |table, key| table.get(key)?.as_table())
@@ -405,9 +425,19 @@ fn is_ports_row(value: &Value) -> bool {
 mod sidebar_config_tests {
     use super::{
         add_ports_row_to_config, commented_default_assignment,
-        dashboard_setup_status_from_document, parse_config, update_dashboard_popup_shortcut,
-        update_herdr_notifications, update_ports_row_with_default_rows,
+        dashboard_setup_status_from_document, parse_config, theme_name_from_document,
+        update_dashboard_popup_shortcut, update_herdr_notifications,
+        update_ports_row_with_default_rows,
     };
+
+    #[test]
+    fn reads_the_configured_herdr_theme_name() {
+        let document = parse_config("[theme]\nname = \"catppuccin-latte\"\n").unwrap();
+        assert_eq!(
+            theme_name_from_document(&document).as_deref(),
+            Some("catppuccin-latte")
+        );
+    }
 
     #[test]
     fn adds_the_ports_row_to_an_existing_sidebar_layout() {

@@ -277,8 +277,12 @@ impl Drop for OwnedMaster {
 
 pub(crate) fn remote_session_install_command(remote_path: &str) -> String {
     let temporary_path = format!("{remote_path}.tmp");
+    let parent_directory = remote_path
+        .rsplit_once('/')
+        .map(|(parent, _)| parent)
+        .expect("remote session path must have a parent directory");
     format!(
-        "set -eu; install -d -m 700 \"$HOME/.cache/herdr-fwd\"; umask 077; cat > {temporary_path}; chmod 600 {temporary_path}; mv -f {temporary_path} {remote_path}"
+        "set -eu; install -d -m 700 \"{parent_directory}\"; umask 077; cat > \"{temporary_path}\"; chmod 600 \"{temporary_path}\"; mv -f \"{temporary_path}\" \"{remote_path}\""
     )
 }
 
@@ -319,7 +323,8 @@ mod ssh_tests {
     #[test]
     fn installs_the_session_payload_from_stdin_with_private_permissions() {
         let runtime = RuntimeDirectory::create("herdr-fwd-session-install-test-").unwrap();
-        let command = remote_session_install_command("$HOME/.cache/herdr-fwd/session-abc.json");
+        let command =
+            remote_session_install_command("$HOME/.local/state/herdr-fwd/session-abc.json");
         let payload = br#"{"token":"sentinel"}"#;
         let mut child = Command::new("sh")
             .arg("-c")
@@ -333,7 +338,9 @@ mod ssh_tests {
         drop(stdin);
 
         assert!(child.wait().unwrap().success());
-        let session = runtime.path().join(".cache/herdr-fwd/session-abc.json");
+        let session = runtime
+            .path()
+            .join(".local/state/herdr-fwd/session-abc.json");
         assert_eq!(std::fs::read(&session).unwrap(), payload);
         #[cfg(unix)]
         assert_eq!(

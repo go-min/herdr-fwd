@@ -45,7 +45,7 @@ brew install go-min/tap/herdr-fwd
 Both installation methods provide the `hfwd` executable. The repository,
 plugin, release archives, and Homebrew formula keep the `herdr-fwd` name.
 
-The remote host needs Herdr 0.7.x (0.7.5+), OpenSSH access, `git`, `curl`,
+The remote host needs Herdr 0.8.x, OpenSSH access, `git`, `curl`,
 `tar`, `lsof`, a SHA-256 utility, and outbound GitHub access. The local host
 needs the same archive tools. When the manifest version has no matching GitHub
 Release archive yet, installation fails with an actionable error; production

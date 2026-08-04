@@ -5,9 +5,21 @@ local machine. Herdr Fwd discovers loopback TCP listeners owned by processes in
 remote panes, opens SSH forwards, and presents them in a native terminal
 dashboard—without manually maintaining `ssh -L` arguments.
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset=".github/assets/demo/overview-dark.gif">
+  <source media="(prefers-color-scheme: light)" srcset=".github/assets/demo/overview-light.gif">
+  <img
+    alt="A remote Herdr session running Next.js, followed by the Port Forward dashboard for its loopback listener"
+    src=".github/assets/demo/overview-light.gif">
+</picture>
+
+The overview follows the real remote flow: a Next.js server runs in a remote
+Herdr pane, `hfwd` attaches through SSH, and the plugin opens its dashboard for
+that discovered loopback listener.
+
 ## Requirements
 
-- Herdr 0.7.5 or newer on every machine that runs the plugin;
+- Herdr 0.8.x on every machine that runs the plugin;
 - macOS or Linux;
 - `git`, `curl`, `tar`, `lsof`, and `sha256sum` or `shasum` on the plugin host;
 - Rust and Cargo for source development only; released plugin installation uses verified archives;
@@ -101,7 +113,7 @@ brew install go-min/tap/herdr-fwd
 ```
 
 The script installs to `~/.local/bin` by default. Pin a release with
-`--version 0.1.4`, or download and inspect the root `install.sh` before running
+`--version 0.1.5`, or download and inspect the root `install.sh` before running
 it. The installed command is `hfwd`; the project and Homebrew formula remain
 named `herdr-fwd`. Homebrew upgrades use the standard
 `brew upgrade herdr-fwd` command.
@@ -196,7 +208,7 @@ The main actions are:
 - `↑`/`↓` or `j`/`k` to navigate;
 - `Enter` to focus the source pane and `o` to open the local URL;
 - `Space` to pause or resume a mapping;
-- `c` to change its local port;
+- `p` to choose a different local port;
 - `a` to create a manual loopback mapping;
 - `d` to remove a manual mapping;
 - `h` to open integration settings; and
@@ -206,6 +218,33 @@ Paused automatic ports and manual mappings are restored per resolved remote
 host, so state does not leak between machines. See the complete
 [plugin and dashboard guide](docs/plugin.md) for persistence, notifications,
 sidebar metadata, popup views, and every keyboard action.
+
+This recording starts with Storybook selected, moves to Vite, and pauses its
+mapping. The state change happens through the dashboard's normal companion API,
+not a pre-rendered terminal frame.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset=".github/assets/demo/dashboard-dark.gif">
+  <source media="(prefers-color-scheme: light)" srcset=".github/assets/demo/dashboard-light.gif">
+  <img
+    alt="Dashboard moves selection from Storybook to Vite, then changes the Vite mapping from active to paused"
+    src=".github/assets/demo/dashboard-light.gif">
+</picture>
+
+### Integration settings
+
+Open `h` in the dashboard to adjust the post-forward destination, sidebar
+status, notifications, popup shortcut, and process-tree depth. The recording
+opens this menu from the same dashboard fixture, so every visible setting is a
+real plugin control.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset=".github/assets/demo/settings-dark.gif">
+  <source media="(prefers-color-scheme: light)" srcset=".github/assets/demo/settings-light.gif">
+  <img
+    alt="Integration settings: dashboard destination, sidebar, notifications, popup shortcut, and process-tree depth"
+    src=".github/assets/demo/settings-light.gif">
+</picture>
 
 ## Update and remove
 

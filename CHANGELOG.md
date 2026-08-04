@@ -5,6 +5,13 @@ Versioning.
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-08-04
+
+### Changed
+
+- Require Herdr 0.8.0 through 0.8.x on local and remote hosts.
+- Refresh the production Overview recording for the Herdr 0.8 remote flow.
+
 ## [0.1.4] - 2026-07-30
 
 ### Fixed
