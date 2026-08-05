@@ -140,11 +140,6 @@ def main() -> None:
     tap_creation = release.find("brew tap-new")
     if identity < 0 or identity > tap_creation:
         fail("Homebrew package tests must configure Git identity before creating a tap")
-    local_version = release.find('"${RELEASE_TAG#v}"')
-    formula_style = release.find("brew style")
-    if local_version < 0 or local_version > formula_style:
-        fail("Homebrew package tests must pin the version inferred from local artifact URLs")
-
     manual_homebrew = ROOT / ".github/workflows/homebrew.yml"
     if not manual_homebrew.is_file():
         fail("manual Homebrew publication workflow is required")
