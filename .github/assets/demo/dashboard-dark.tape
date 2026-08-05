@@ -23,5 +23,6 @@ Type "j"
 Sleep 1s
 Type " "
 Sleep 2s
+Hide
 Type "q"
 Sleep 1s
