@@ -21,6 +21,7 @@ Type "h"
 Sleep 1s
 Show
 Sleep 4s
+Hide
 Escape
 Type "q"
 Sleep 1s
