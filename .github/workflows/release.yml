@@ -4,12 +4,21 @@ on:
   push:
     tags:
       - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to publish
+        required: true
+        type: string
+
+env:
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
 
 permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ inputs.tag || github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -37,6 +46,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          ref: ${{ env.RELEASE_TAG }}
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
@@ -44,8 +54,8 @@ jobs:
         with:
           toolchain: stable
           target: ${{ matrix.target }}
-      - run: scripts/check-release.sh "${GITHUB_REF_NAME}"
-      - run: git merge-base --is-ancestor "${GITHUB_SHA}" origin/main
+      - run: scripts/check-release.sh "$RELEASE_TAG"
+      - run: git merge-base --is-ancestor "$(git rev-list -n 1 "$RELEASE_TAG")" origin/main
       - if: matrix.platform == 'linux-x86_64'
         run: shellcheck install.sh uninstall.sh scripts/*.sh
       - if: matrix.platform == 'linux-x86_64'
@@ -93,15 +103,20 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: herdr-fwd
+          ref: ${{ env.RELEASE_TAG }}
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: release-*
           path: release
           merge-multiple: true
       - uses: Homebrew/actions/setup-homebrew@df4b09108a1de9d6f995fe68f302b3f68bd6d2ef # 2026.07.20.1
+      - name: Configure Git identity for the temporary tap
+        run: |
+          git config --global user.name github-actions[bot]
+          git config --global user.email 41898282+github-actions[bot]@users.noreply.github.com
       - name: Render, install, and test formula
         run: |
-          release_base="$RUNNER_TEMP/releases/download/$GITHUB_REF_NAME"
+          release_base="$RUNNER_TEMP/releases/download/$RELEASE_TAG"
           mkdir -p "$release_base"
           cp release/*.tar.gz "$release_base/"
           if command -v sha256sum >/dev/null 2>&1; then
@@ -114,7 +129,7 @@ jobs:
           tap="$(brew --repository go-min/herdr-fwd-test)"
           HERDR_FWD_RELEASE_BASE="file://$release_base" \
             herdr-fwd/scripts/render-homebrew-formula.sh \
-              "$GITHUB_REF_NAME" "$RUNNER_TEMP/SHA256SUMS" \
+              "$RELEASE_TAG" "$RUNNER_TEMP/SHA256SUMS" \
               "$tap/Formula/herdr-fwd.rb"
           brew style go-min/herdr-fwd-test/herdr-fwd
           brew install go-min/herdr-fwd-test/herdr-fwd
@@ -131,6 +146,8 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.RELEASE_TAG }}
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: dist
@@ -150,10 +167,10 @@ jobs:
       - env:
           GH_TOKEN: ${{ github.token }}
         run: >-
-          gh release create "${GITHUB_REF_NAME}"
+          gh release create "$RELEASE_TAG"
           dist/*.tar.gz dist/*.spdx.json dist/SHA256SUMS
           --verify-tag
-          --title "${GITHUB_REF_NAME}"
+          --title "$RELEASE_TAG"
           --generate-notes
 
   homebrew:
@@ -167,6 +184,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: herdr-fwd
+          ref: ${{ env.RELEASE_TAG }}
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: go-min/homebrew-tap
@@ -176,7 +194,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: >-
-          gh release download "$GITHUB_REF_NAME"
+          gh release download "$RELEASE_TAG"
           --repo "$GITHUB_REPOSITORY"
           --pattern SHA256SUMS
           --dir release
@@ -184,10 +202,10 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         run: |
-          version="${GITHUB_REF_NAME#v}"
+          version="${RELEASE_TAG#v}"
           branch="herdr-fwd-$version"
           herdr-fwd/scripts/render-homebrew-formula.sh \
-            "$GITHUB_REF_NAME" release/SHA256SUMS \
+            "$RELEASE_TAG" release/SHA256SUMS \
             homebrew-tap/Formula/herdr-fwd.rb
 
           cd homebrew-tap
@@ -196,7 +214,7 @@ jobs:
             git switch -C "$branch" FETCH_HEAD
             git checkout -- Formula/herdr-fwd.rb
             ../herdr-fwd/scripts/render-homebrew-formula.sh \
-              "$GITHUB_REF_NAME" ../release/SHA256SUMS \
+              "$RELEASE_TAG" ../release/SHA256SUMS \
               Formula/herdr-fwd.rb
           else
             git switch -c "$branch"
@@ -218,5 +236,5 @@ jobs:
             gh pr create --repo go-min/homebrew-tap \
               --base main --head "$branch" \
               --title "herdr-fwd $version" \
-              --body "Update herdr-fwd to [$GITHUB_REF_NAME](https://github.com/$GITHUB_REPOSITORY/releases/tag/$GITHUB_REF_NAME)."
+              --body "Update herdr-fwd to [$RELEASE_TAG](https://github.com/$GITHUB_REPOSITORY/releases/tag/$RELEASE_TAG)."
           fi

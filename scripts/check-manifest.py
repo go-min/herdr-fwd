@@ -127,6 +127,19 @@ def main() -> None:
         fail("GitHub Release publication must require Homebrew package tests")
     if "needs: [publish, homebrew-preflight, homebrew-test]" not in release:
         fail("Homebrew publication must require release, access, and package tests")
+    for required in (
+        "workflow_dispatch:",
+        "RELEASE_TAG: ${{ inputs.tag || github.ref_name }}",
+        "ref: ${{ env.RELEASE_TAG }}",
+    ):
+        if required not in release:
+            fail(f"release recovery workflow is missing {required!r}")
+    if "GITHUB_REF_NAME" in release:
+        fail("release workflow must use the validated release tag in every job")
+    identity = release.find("git config --global user.name github-actions[bot]")
+    tap_creation = release.find("brew tap-new")
+    if identity < 0 or identity > tap_creation:
+        fail("Homebrew package tests must configure Git identity before creating a tap")
 
     manual_homebrew = ROOT / ".github/workflows/homebrew.yml"
     if not manual_homebrew.is_file():
