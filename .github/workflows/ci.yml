@@ -30,12 +30,11 @@ jobs:
       - run: cargo test --all-targets --locked
       - run: cargo clippy --all-targets --locked --all-features -- -D warnings
       - run: cargo build --release --locked
+      - run: make package-smoke
       - if: matrix.os == 'ubuntu-latest'
         run: make markdown-check
       - if: matrix.os == 'ubuntu-latest'
         run: make manifest-check scripts-check
-      - if: matrix.os == 'ubuntu-latest'
-        run: shellcheck install.sh uninstall.sh scripts/*.sh scripts/test-server.sh
       - if: matrix.os == 'ubuntu-latest'
         uses: EmbarkStudios/cargo-deny-action@b66acf5e9fe20f8aba065be86778a8a4c846f902 # v2
         with:

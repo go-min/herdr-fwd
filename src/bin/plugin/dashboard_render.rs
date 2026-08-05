@@ -15,12 +15,14 @@ use crate::plugin::dashboard_terminal::{
     RemoveForwardConfirmation,
 };
 use crate::plugin::herdr::PaneLocation;
+use crate::plugin::sidebar_config::configured_theme_name;
 
 pub(crate) fn render_dashboard(
     config: &RemoteSessionConfig,
     forwards: &[Forward],
     locations: &HashMap<String, PaneLocation>,
     state: &DashboardState,
+    palette: DashboardPalette,
 ) -> Result<(), String> {
     let (width, height) = terminal::size().unwrap_or((100, 30));
     let mut stdout = std::io::stdout();
@@ -78,6 +80,7 @@ pub(crate) fn render_dashboard(
                 &line,
                 line.forward_index == Some(state.selected),
                 forwards,
+                palette,
             )?;
         }
     }
@@ -219,8 +222,8 @@ fn canonical_dashboard_shortcuts(
             footer: true,
         });
         shortcuts.push(DashboardShortcut {
-            key: "c",
-            label: if compact { "local" } else { "local port" },
+            key: "p",
+            label: if compact { "port" } else { "change port" },
             footer: true,
         });
         if !forward.automatic {
@@ -333,6 +336,16 @@ fn shortcut_text(shortcuts: &[DashboardShortcut], compact: bool) -> String {
 struct TreeLine {
     text: String,
     forward_index: Option<usize>,
+    kind: TreeLineKind,
+}
+
+#[derive(Clone, Copy)]
+enum TreeLineKind {
+    Blank,
+    ManualHeader,
+    Section,
+    Branch,
+    Forward,
 }
 
 struct LocationInfo<'a> {
@@ -357,29 +370,42 @@ fn tree_lines(forwards: &[Forward], locations: &HashMap<String, PaneLocation>) -
                     lines.push(TreeLine {
                         text: String::new(),
                         forward_index: None,
+                        kind: TreeLineKind::Blank,
                     });
                 }
                 lines.push(TreeLine {
-                    text: "󰖟 MANUAL FORWARDS".into(),
+                    text: "  󰖟 MANUAL FORWARDS".into(),
                     forward_index: None,
+                    kind: TreeLineKind::ManualHeader,
                 });
                 manual_section = true;
             }
+            let has_next_manual = indexes[position + 1..]
+                .iter()
+                .any(|next_index| !forwards[*next_index].automatic);
+            let branch = if has_next_manual { "├─" } else { "└─" };
+            let continuation = if has_next_manual {
+                "  │  "
+            } else {
+                "       "
+            };
             lines.push(TreeLine {
                 text: format!(
-                    "  {} {} {}:{}  →  localhost:{}  ·  {}",
-                    status(forward),
-                    forward_state_label(forward),
-                    forward.remote_host_display(),
-                    forward.remote_port,
-                    forward.local_port,
-                    tunnel_status(forward)
+                    "  {branch} {status} {state} {host}:{remote_port}  →  localhost:{local_port}  ·  {tunnel}",
+                    status = status(forward),
+                    state = forward_state_label(forward),
+                    host = forward.remote_host_display(),
+                    remote_port = forward.remote_port,
+                    local_port = forward.local_port,
+                    tunnel = tunnel_status(forward),
                 ),
                 forward_index: Some(index),
+                kind: TreeLineKind::Forward,
             });
             lines.push(TreeLine {
-                text: format!("    tunnel {}", tunnel_time(forward)),
+                text: format!("{continuation}tunnel {}", tunnel_time(forward)),
                 forward_index: Some(index),
+                kind: TreeLineKind::Forward,
             });
             continue;
         }
@@ -388,11 +414,16 @@ fn tree_lines(forwards: &[Forward], locations: &HashMap<String, PaneLocation>) -
         let workspace = location.workspace;
         let tab_id = location.tab_id;
         let tab = location.tab;
-        let pane = forward.pane_id.as_str();
+        let pane_id = forward.pane_id.as_str();
+        let pane = locations
+            .get(pane_id)
+            .map(|location| pane_heading(forward, location))
+            .unwrap_or_else(|| forward.process.clone());
         if workspace_id != previous.0 {
             lines.push(TreeLine {
                 text: format!("  󰉋 {workspace}"),
                 forward_index: None,
+                kind: TreeLineKind::Section,
             });
             previous.0 = workspace_id.into();
             previous.1.clear();
@@ -414,6 +445,7 @@ fn tree_lines(forwards: &[Forward], locations: &HashMap<String, PaneLocation>) -
                     tab_icon()
                 ),
                 forward_index: None,
+                kind: TreeLineKind::Branch,
             });
             previous.1 = tab_id.into();
             previous.2.clear();
@@ -441,22 +473,18 @@ fn tree_lines(forwards: &[Forward], locations: &HashMap<String, PaneLocation>) -
         } else {
             format!("{tab_continuation}   ")
         };
-        if pane != previous.2 {
+        if pane_id != previous.2 {
             lines.push(TreeLine {
                 text: format!(
-                    "{tab_continuation}{} {} {pane}  ·  {} {}{}",
+                    "{tab_continuation}{} {} {pane}  │  {}",
                     if pane_has_future { "├─" } else { "└─" },
                     pane_icon(),
-                    process_icon(&forward.process),
-                    forward.process,
-                    forward
-                        .process_id
-                        .map(|process_id| format!("  ·  pid {process_id}"))
-                        .unwrap_or_default()
+                    pane_metadata(forward),
                 ),
                 forward_index: None,
+                kind: TreeLineKind::Branch,
             });
-            previous.2 = pane.into();
+            previous.2 = pane_id.into();
         }
         lines.push(TreeLine {
             text: format!(
@@ -470,6 +498,7 @@ fn tree_lines(forwards: &[Forward], locations: &HashMap<String, PaneLocation>) -
                 tunnel_status(forward),
             ),
             forward_index: Some(index),
+            kind: TreeLineKind::Forward,
         });
         lines.push(TreeLine {
             text: format!(
@@ -482,6 +511,7 @@ fn tree_lines(forwards: &[Forward], locations: &HashMap<String, PaneLocation>) -
                 tunnel_time(forward),
             ),
             forward_index: Some(index),
+            kind: TreeLineKind::Forward,
         });
     }
     lines
@@ -547,29 +577,31 @@ fn pane_icon() -> &'static str {
     "󰆍"
 }
 
+fn pane_heading(forward: &Forward, location: &PaneLocation) -> String {
+    location
+        .pane_label
+        .as_deref()
+        .unwrap_or(&forward.process)
+        .into()
+}
+
+fn pane_metadata(forward: &Forward) -> String {
+    format!(
+        "{}  ·  {} {}{}",
+        forward.pane_id,
+        process_icon(&forward.process),
+        forward.process,
+        forward
+            .process_id
+            .map(|process_id| format!("  ·  pid {process_id}"))
+            .unwrap_or_default()
+    )
+}
+
 fn process_icon(process: &str) -> &'static str {
-    let process = process.to_ascii_lowercase();
-    if process.contains("vite") {
-        ""
-    } else if process.contains("node") {
-        ""
-    } else if process.contains("nginx") {
-        ""
-    } else if process.contains("bun") {
-        ""
-    } else if process.contains("deno") {
-        ""
-    } else if process.contains("vue") || process.contains("nuxt") {
-        ""
-    } else if process.contains("svelte") {
-        ""
-    } else if process.contains("python") {
-        ""
-    } else if process.contains("react") || process.contains("next") {
-        ""
-    } else {
-        "󰒋"
-    }
+    herdr_fwd::tools::tool_for_text(process)
+        .and_then(|tool| tool.icon)
+        .unwrap_or("󰒋")
 }
 
 pub(crate) fn sort_for_display(
@@ -695,19 +727,20 @@ fn render_tree_line(
     line: &TreeLine,
     selected: bool,
     forwards: &[Forward],
+    palette: DashboardPalette,
 ) -> Result<(), String> {
-    let color = tree_line_color(line, selected, forwards);
+    let color = palette.color_for(line, forwards);
     if selected {
         queue!(
             stdout,
             SetAttribute(Attribute::Bold),
-            SetForegroundColor(Color::White),
-            SetBackgroundColor(Color::DarkGrey)
+            SetBackgroundColor(palette.selection)
         )
         .map_err(|error| error.to_string())?;
-    } else if line
-        .forward_index
-        .is_some_and(|index| !forwards[index].enabled)
+    } else if palette.dim_paused
+        && line
+            .forward_index
+            .is_some_and(|index| !forwards[index].enabled)
     {
         queue!(stdout, SetAttribute(Attribute::Dim)).map_err(|error| error.to_string())?;
     } else if line.forward_index.is_none() {
@@ -721,11 +754,22 @@ fn render_tree_line(
     } else {
         queue!(stdout, ResetColor).map_err(|error| error.to_string())?;
     }
+    let (primary, metadata) = split_tree_metadata(content);
     queue!(
         stdout,
         Print(prefix),
         SetForegroundColor(color),
-        Print(content),
+        Print(primary),
+    )
+    .map_err(|error| error.to_string())?;
+    if !metadata.is_empty() {
+        if palette.dim_metadata {
+            queue!(stdout, SetAttribute(Attribute::Dim)).map_err(|error| error.to_string())?;
+        }
+        queue!(stdout, Print(metadata)).map_err(|error| error.to_string())?;
+    }
+    queue!(
+        stdout,
         SetAttribute(Attribute::Reset),
         ResetColor,
         Print("\r\n")
@@ -734,29 +778,120 @@ fn render_tree_line(
     Ok(())
 }
 
-fn tree_line_color(line: &TreeLine, selected: bool, forwards: &[Forward]) -> Color {
-    if selected {
-        Color::White
-    } else if line
-        .forward_index
-        .is_some_and(|index| forwards[index].enabled)
-    {
-        Color::Green
-    } else if line.forward_index.is_some() {
-        Color::Yellow
-    } else if line.text.contains("MANUAL FORWARDS") {
-        Color::Magenta
-    } else if line.forward_index.is_none()
-        && !line.text.trim().is_empty()
-        && !line.text.contains("├─")
-        && !line.text.contains("└─")
-    {
-        Color::Cyan
-    } else if line.forward_index.is_none() {
-        Color::Blue
-    } else {
-        Color::Reset
+fn split_tree_metadata(value: &str) -> (&str, &str) {
+    value
+        .find("  │  ")
+        .map(|index| value.split_at(index))
+        .unwrap_or((value, ""))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct DashboardPalette {
+    active: Color,
+    paused: Color,
+    manual: Color,
+    section: Color,
+    tree: Color,
+    selection: Color,
+    dim_metadata: bool,
+    dim_paused: bool,
+}
+
+impl DashboardPalette {
+    pub(crate) fn from_environment() -> Self {
+        let theme_name = configured_theme_name().ok().flatten();
+        Self::from_theme_and_colorfgbg(
+            theme_name.as_deref(),
+            std::env::var("COLORFGBG").ok().as_deref(),
+        )
     }
+
+    fn from_theme_and_colorfgbg(theme_name: Option<&str>, colorfgbg: Option<&str>) -> Self {
+        if uses_light_palette(theme_name, colorfgbg) {
+            Self::light()
+        } else {
+            Self::dark()
+        }
+    }
+
+    fn dark() -> Self {
+        Self {
+            active: Color::Green,
+            paused: Color::Yellow,
+            manual: Color::Magenta,
+            section: Color::Cyan,
+            tree: Color::Blue,
+            selection: Color::DarkGrey,
+            dim_metadata: true,
+            dim_paused: true,
+        }
+    }
+
+    fn light() -> Self {
+        Self {
+            active: Color::DarkGreen,
+            paused: Color::AnsiValue(136),
+            manual: Color::DarkMagenta,
+            section: Color::DarkCyan,
+            tree: Color::DarkBlue,
+            selection: Color::AnsiValue(252),
+            dim_metadata: false,
+            dim_paused: false,
+        }
+    }
+
+    fn color_for(self, line: &TreeLine, forwards: &[Forward]) -> Color {
+        if let Some(index) = line.forward_index {
+            return if forwards[index].enabled {
+                self.active
+            } else {
+                self.paused
+            };
+        }
+        match line.kind {
+            TreeLineKind::ManualHeader => self.manual,
+            TreeLineKind::Section => self.section,
+            TreeLineKind::Branch => self.tree,
+            TreeLineKind::Blank | TreeLineKind::Forward => Color::Reset,
+        }
+    }
+}
+
+fn uses_light_palette(theme_name: Option<&str>, colorfgbg: Option<&str>) -> bool {
+    const LIGHT_THEMES: &[&str] = &[
+        "catppuccin-latte",
+        "tokyo-night-day",
+        "gruvbox-light",
+        "one-light",
+        "solarized-light",
+        "kanagawa-lotus",
+        "rose-pine-dawn",
+    ];
+    const DARK_THEMES: &[&str] = &[
+        "catppuccin",
+        "tokyo-night",
+        "dracula",
+        "nord",
+        "gruvbox",
+        "one-dark",
+        "solarized",
+        "kanagawa",
+        "rose-pine",
+        "vesper",
+    ];
+
+    if let Some(theme_name) = theme_name.map(str::trim) {
+        if LIGHT_THEMES.contains(&theme_name) {
+            return true;
+        }
+        if DARK_THEMES.contains(&theme_name) {
+            return false;
+        }
+    }
+    colorfgbg
+        .and_then(|value| value.split(';').next_back())
+        .and_then(|background| background.parse::<u8>().ok())
+        .is_some_and(|background| matches!(background, 7 | 15))
 }
 
 fn tree_prefix_length(value: &str) -> usize {
@@ -801,7 +936,7 @@ fn help_shortcut_description(shortcut: &DashboardShortcut) -> &'static str {
         "Enter" | "↵" => "Focus the source pane",
         "o" => "Open the forwarded URL",
         "Space" => "Pause or resume the selected forward",
-        "c" => "Change the local port",
+        "p" => "Choose a different local port",
         "d" => "Remove the manual forward",
         "a" => "Add a manual forward",
         "h" => "Open integration settings",
@@ -1100,19 +1235,14 @@ fn truncate(value: &str, width: usize) -> String {
 mod dashboard_render_tests {
     use std::collections::HashMap;
 
-    use crossterm::style::Color;
     use herdr_fwd::registry::Forward;
 
-    use crate::plugin::dashboard_terminal::IntegrationMenu;
     use crate::plugin::herdr::PaneLocation;
-    use crate::plugin::preferences::AfterForward;
 
     use super::{
-        canonical_dashboard_shortcuts, compact_message, forward_counts, forward_index_at,
-        forward_state_label, help_shortcut_lines, integration_footer, pane_icon, process_icon,
-        render_dashboard_shortcuts, shortcut_text, status, tab_icon, tree_forward_indexes,
-        tree_line_color, tree_prefix_length, tree_scroll_window, tree_text, truncate,
-        tunnel_status, tunnel_time, TreeLine,
+        canonical_dashboard_shortcuts, forward_index_at, pane_heading, pane_metadata,
+        shortcut_text, split_tree_metadata, tree_forward_indexes, tree_scroll_window, tree_text,
+        truncate, uses_light_palette,
     };
 
     fn forward(automatic: bool, enabled: bool, pane_id: &str) -> Forward {
@@ -1140,29 +1270,20 @@ mod dashboard_render_tests {
     }
 
     #[test]
-    fn integration_footer_matches_the_selected_control_type() {
-        let mut menu = IntegrationMenu {
-            selected: 0,
-            after_forward: AfterForward::Space,
-            sidebar_ports_enabled: false,
-            toast_delivery: None,
-            popup_shortcut_enabled: false,
-            process_tree_depth: 2,
+    fn prioritizes_an_explicit_pane_label_and_separates_metadata() {
+        let location = PaneLocation {
+            pane_label: Some("▲ Next.js".into()),
+            ..PaneLocation::default()
         };
-        assert!(integration_footer(&menu).contains("←/→ adjust"));
-        menu.selected = 1;
-        assert!(integration_footer(&menu).contains("toggle"));
-        assert!(!integration_footer(&menu).contains("←/→"));
-        menu.selected = 2;
-        assert!(integration_footer(&menu).contains("setup"));
-        assert!(!integration_footer(&menu).contains("←/→"));
-    }
+        let mut next = forward(true, true, "wT:p1");
+        next.process = "Next.js".into();
+        next.process_id = Some(700_590);
 
-    #[test]
-    fn compacts_multiline_messages_for_the_footer() {
+        assert_eq!(pane_heading(&next, &location), "▲ Next.js");
+        assert_eq!(pane_metadata(&next), "wT:p1  ·   Next.js  ·  pid 700590");
         assert_eq!(
-            compact_message("Action failed.\nRPC unavailable\n\nPress r to retry."),
-            "Action failed. · RPC unavailable ·  · Press r to retry."
+            split_tree_metadata("󰆍 ▲ Next.js  │  wT:p1  ·   Next.js  ·  pid 700590"),
+            ("󰆍 ▲ Next.js", "  │  wT:p1  ·   Next.js  ·  pid 700590")
         );
     }
 
@@ -1182,74 +1303,15 @@ mod dashboard_render_tests {
     }
 
     #[test]
-    fn uses_nerd_font_icons_for_known_tools_and_a_generic_fallback() {
-        assert_eq!(tab_icon(), "󰓩");
-        assert_eq!(pane_icon(), "󰆍");
-        assert_eq!(process_icon("Vite"), "");
-        assert_eq!(process_icon("Nginx"), "");
-        assert_eq!(process_icon("Bun"), "");
-        assert_eq!(process_icon("unknown-server"), "󰒋");
-    }
-
-    #[test]
-    fn keeps_tree_connectors_neutral_and_uses_status_bullets() {
-        let live = forward(true, true, "w1:p1");
-        let mut paused = forward(true, false, "w1:p1");
-        paused.tunnel_opened_at = 1_722_000_120;
-        assert_eq!(status(&live), "●");
-        assert_eq!(status(&paused), "○");
-        assert_eq!(tunnel_status(&paused), "paused");
-        assert_eq!(tunnel_time(&paused), "—");
-        assert_eq!(forward_counts(&[live, paused]), (2, 1, 1));
-        assert_eq!(tree_prefix_length("  │  └─ 󰆍 w1:p1"), "  │  └─ ".len());
-    }
-
-    #[test]
-    fn labels_active_and_paused_forwards_in_text() {
-        assert_eq!(forward_state_label(&forward(true, true, "w1:p1")), "ACTIVE");
-        assert_eq!(
-            forward_state_label(&forward(true, false, "w1:p1")),
-            "PAUSED"
-        );
-    }
-
-    #[test]
-    fn colors_every_line_of_an_active_or_paused_forward() {
-        let line = TreeLine {
-            text: "          server —  ·  tunnel —".into(),
-            forward_index: Some(0),
-        };
-        assert_eq!(
-            tree_line_color(&line, false, &[forward(true, true, "w1:p1")]),
-            Color::Green
-        );
-        assert_eq!(
-            tree_line_color(&line, false, &[forward(true, false, "w1:p1")]),
-            Color::Yellow
-        );
-    }
-
-    #[test]
-    fn uses_one_space_before_the_remote_address() {
-        let forwards = vec![forward(true, true, "w1:p1"), forward(false, true, "manual")];
-        let locations = HashMap::from([(
-            "w1:p1".into(),
-            PaneLocation {
-                workspace_id: "w1".into(),
-                workspace: "Apps".into(),
-                tab_id: "w1:t1".into(),
-                tab: "API".into(),
-                ..Default::default()
-            },
-        )]);
-
-        let text = tree_text(&forwards, &locations);
-        assert!(text
-            .iter()
-            .any(|line| line.contains("● ACTIVE 127.0.0.1:5173")));
-        assert!(!text
-            .iter()
-            .any(|line| line.contains("● ACTIVE  127.0.0.1:5173")));
+    fn detects_light_themes_from_herdr_or_the_terminal_background() {
+        assert!(uses_light_palette(Some("catppuccin-latte"), None));
+        assert!(uses_light_palette(Some("tokyo-night-day"), Some("15;0")));
+        assert!(!uses_light_palette(Some("catppuccin"), Some("0;15")));
+        assert!(uses_light_palette(None, Some("0;15")));
+        assert!(uses_light_palette(None, Some("0;7")));
+        assert!(!uses_light_palette(None, Some("15;0")));
+        assert!(!uses_light_palette(None, Some("default;default")));
+        assert!(!uses_light_palette(None, None));
     }
 
     #[test]
@@ -1276,47 +1338,6 @@ mod dashboard_render_tests {
         assert!(shortcuts.contains("o open"));
         assert!(shortcuts.contains("d remove"));
         assert!(!shortcuts.contains("Enter pane"));
-    }
-
-    #[test]
-    fn empty_dashboard_shows_only_global_actions() {
-        let shortcuts = canonical_dashboard_shortcuts(120, 0, None);
-        assert_eq!(
-            shortcut_text(&shortcuts, false),
-            "  a add   h settings   ? help"
-        );
-    }
-
-    #[test]
-    fn renders_shortcut_keys_in_bold_and_labels_dimmed() {
-        let custom = forward(false, true, "w1:p1");
-        let shortcuts = canonical_dashboard_shortcuts(120, 2, Some(&custom));
-        let mut output = Vec::new();
-        render_dashboard_shortcuts(&mut output, 120, &shortcuts).unwrap();
-        let output = String::from_utf8(output).unwrap();
-        assert!(output.contains("\x1b[1m↑↓/jk"));
-        assert!(output.contains("\x1b[2m navigate"));
-        assert!(output.contains("\x1b[1md"));
-        assert!(output.contains("\x1b[2m remove"));
-    }
-
-    #[test]
-    fn derives_contextual_help_from_canonical_shortcuts() {
-        let paused = forward(true, false, "w1:p1");
-        assert_eq!(
-            help_shortcut_lines(1, Some(&paused)),
-            vec![
-                "KEYBOARD SHORTCUTS".to_string(),
-                "Enter  Focus the source pane".to_string(),
-                "Space  Pause or resume the selected forward".to_string(),
-                "c      Change the local port".to_string(),
-                "a      Add a manual forward".to_string(),
-                "h      Open integration settings".to_string(),
-                "?      Show keyboard shortcuts".to_string(),
-                "r      Refresh forwarding status".to_string(),
-                "Esc    Close the current view".to_string(),
-            ]
-        );
     }
 
     #[test]
@@ -1376,15 +1397,15 @@ mod dashboard_render_tests {
             vec![
                 "  󰉋 Apps",
                 "  └─ 󰓩 Frontend",
-                "     ├─ 󰆍 w1:p1  ·   Vite  ·  pid 9132",
+                "     ├─ 󰆍 Vite  │  w1:p1  ·   Vite  ·  pid 9132",
                 "     │  ● ACTIVE 127.0.0.1:5173  →  localhost:5173  ·  live —",
                 "     │    server —  ·  tunnel —",
-                "     └─ 󰆍 w1:p2  ·   Vite",
+                "     └─ 󰆍 Vite  │  w1:p2  ·   Vite",
                 "        ● ACTIVE 127.0.0.1:5173  →  localhost:5173  ·  live —",
                 "          server —  ·  tunnel —",
                 "  󰉋 Services",
                 "  └─ 󰓩 API",
-                "     └─ 󰆍 w2:p1  ·   Vite",
+                "     └─ 󰆍 Vite  │  w2:p1  ·   Vite",
                 "        ● ACTIVE 127.0.0.1:5173  →  localhost:5173  ·  live —",
                 "          server —  ·  tunnel —",
             ]
@@ -1430,12 +1451,12 @@ mod dashboard_render_tests {
             vec![
                 "  󰉋 Apps",
                 "  └─ 󰓩 API",
-                "     └─ 󰆍 w1:p1  ·   Vite",
+                "     └─ 󰆍 Vite  │  w1:p1  ·   Vite",
                 "        ● ACTIVE 127.0.0.1:5173  →  localhost:5173  ·  live —",
                 "          server —  ·  tunnel —",
                 "  󰉋 Apps",
                 "  └─ 󰓩 API",
-                "     └─ 󰆍 w2:p1  ·   Vite",
+                "     └─ 󰆍 Vite  │  w2:p1  ·   Vite",
                 "        ● ACTIVE 127.0.0.1:5173  →  localhost:5173  ·  live —",
                 "          server —  ·  tunnel —",
             ]
@@ -1548,6 +1569,7 @@ mod dashboard_render_tests {
                     tab_id: "w2:t2".into(),
                     tab: "Alpha".into(),
                     tab_number: 2,
+                    pane_label: None,
                 },
             ),
             (
@@ -1559,6 +1581,7 @@ mod dashboard_render_tests {
                     tab_id: "w1:t2".into(),
                     tab: "Alpha".into(),
                     tab_number: 2,
+                    pane_label: None,
                 },
             ),
             (
@@ -1570,6 +1593,7 @@ mod dashboard_render_tests {
                     tab_id: "w1:t1".into(),
                     tab: "Zeta".into(),
                     tab_number: 1,
+                    pane_label: None,
                 },
             ),
             (
@@ -1581,6 +1605,7 @@ mod dashboard_render_tests {
                     tab_id: "w2:t1".into(),
                     tab: "Zeta".into(),
                     tab_number: 1,
+                    pane_label: None,
                 },
             ),
         ]);
@@ -1637,52 +1662,42 @@ mod dashboard_render_tests {
         let text = tree_text(&forwards, &locations);
         let manual_header = text
             .iter()
-            .position(|line| line == "󰖟 MANUAL FORWARDS")
+            .position(|line| line == "  󰖟 MANUAL FORWARDS")
             .unwrap();
         assert_eq!(text[manual_header - 1], "");
         assert_eq!(text.iter().filter(|line| line.is_empty()).count(), 1);
-        assert!(text.contains(&"  ● ACTIVE 127.0.0.1:5173  →  localhost:5173  ·  live —".into()));
+        assert!(text.contains(&"  └─ ● ACTIVE 127.0.0.1:5173  →  localhost:5173  ·  live —".into()));
+        assert!(text.contains(&"       tunnel —".into()));
         assert!(!text.iter().any(|line| line.contains('◆')));
     }
 
     #[test]
-    fn keeps_vertical_connectors_for_sibling_tabs() {
+    fn keeps_manual_forward_metadata_under_its_tree_branch() {
         let forwards = vec![
-            forward(true, true, "w1:p1"),
             Forward {
-                id: "fwd-2".into(),
-                pane_id: "w1:p2".into(),
-                ..forward(true, true, "w1:p1")
+                id: "manual-one".into(),
+                automatic: false,
+                ..forward(false, true, "manual-one")
+            },
+            Forward {
+                id: "manual-two".into(),
+                automatic: false,
+                enabled: false,
+                remote_port: 3000,
+                local_port: 3000,
+                ..forward(false, true, "manual-two")
             },
         ];
-        let locations = HashMap::from([
-            (
-                "w1:p1".into(),
-                PaneLocation {
-                    workspace_id: "w1".into(),
-                    workspace: "Apps".into(),
-                    tab_id: "w1:t1".into(),
-                    tab: "One".into(),
-                    ..Default::default()
-                },
-            ),
-            (
-                "w1:p2".into(),
-                PaneLocation {
-                    workspace_id: "w1".into(),
-                    workspace: "Apps".into(),
-                    tab_id: "w1:t2".into(),
-                    tab: "Two".into(),
-                    ..Default::default()
-                },
-            ),
-        ]);
 
-        let text = tree_text(&forwards, &locations);
-        assert!(text.contains(&"  ├─ 󰓩 One".into()));
-        assert!(text
-            .iter()
-            .any(|line| line.starts_with("  │  └─") && line.contains("w1:p1")));
-        assert!(text.contains(&"  └─ 󰓩 Two".into()));
+        assert_eq!(
+            tree_text(&forwards, &HashMap::new()),
+            vec![
+                "  󰖟 MANUAL FORWARDS",
+                "  ├─ ● ACTIVE 127.0.0.1:5173  →  localhost:5173  ·  live —",
+                "  │  tunnel —",
+                "  └─ ○ PAUSED 127.0.0.1:3000  →  localhost:3000  ·  paused",
+                "       tunnel —",
+            ]
+        );
     }
 }

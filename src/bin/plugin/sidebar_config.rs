@@ -1,8 +1,4 @@
-use std::{
-    env, fs,
-    path::PathBuf,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::{env, fs, path::PathBuf};
 
 use toml_edit::{value, Array, ArrayOfTables, DocumentMut, Item, Table, Value};
 
@@ -29,14 +25,26 @@ pub(crate) fn set_ports_row(enabled: bool) -> Result<DashboardSetupStatus, Strin
 }
 
 pub(crate) fn dashboard_setup_status() -> Result<DashboardSetupStatus, String> {
+    Ok(read_config_document()?
+        .as_ref()
+        .map(dashboard_setup_status_from_document)
+        .unwrap_or_default())
+}
+
+pub(crate) fn configured_theme_name() -> Result<Option<String>, String> {
+    Ok(read_config_document()?
+        .as_ref()
+        .and_then(theme_name_from_document))
+}
+
+fn read_config_document() -> Result<Option<DocumentMut>, String> {
     let path = herdr_config_path()?;
     let config = match fs::read_to_string(&path) {
         Ok(config) => config,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Default::default()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(format!("failed to read {}: {error}", path.display())),
     };
-    let document = parse_config(&config)?;
-    Ok(dashboard_setup_status_from_document(&document))
+    parse_config(&config).map(Some)
 }
 
 pub(crate) fn enable_herdr_notifications() -> Result<DashboardSetupStatus, String> {
@@ -63,7 +71,7 @@ fn update_config(
         return Ok(path);
     }
     if !existing.is_empty() {
-        let backup = path.with_extension("toml.herdr-rpf.bak");
+        let backup = path.with_extension("toml.herdr-fwd.bak");
         fs::copy(&path, &backup).map_err(|error| {
             format!(
                 "failed to back up {} to {}: {error}",
@@ -77,15 +85,7 @@ fn update_config(
         .ok_or_else(|| format!("config path has no parent: {}", path.display()))?;
     fs::create_dir_all(parent)
         .map_err(|error| format!("failed to create {}: {error}", parent.display()))?;
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|error| error.to_string())?
-        .as_nanos();
-    let temporary = parent.join(format!(".config.toml.herdr-rpf-{nonce}.tmp"));
-    fs::write(&temporary, updated)
-        .map_err(|error| format!("failed to write {}: {error}", temporary.display()))?;
-    fs::rename(&temporary, &path)
-        .map_err(|error| format!("failed to update {}: {error}", path.display()))?;
+    herdr_fwd::atomic::write_file(&path, updated.as_bytes(), 0o600)?;
     Ok(path)
 }
 
@@ -376,6 +376,15 @@ fn dashboard_setup_status_from_document(document: &DocumentMut) -> DashboardSetu
     }
 }
 
+fn theme_name_from_document(document: &DocumentMut) -> Option<String> {
+    document
+        .get("theme")
+        .and_then(Item::as_table_like)
+        .and_then(|theme| theme.get("name"))
+        .and_then(Item::as_str)
+        .map(str::to_owned)
+}
+
 fn table_at<'a>(table: &'a Table, path: &[&str]) -> Option<&'a Table> {
     path.iter()
         .try_fold(table, |table, key| table.get(key)?.as_table())
@@ -405,18 +414,30 @@ fn is_ports_row(value: &Value) -> bool {
 mod sidebar_config_tests {
     use super::{
         add_ports_row_to_config, commented_default_assignment,
-        dashboard_setup_status_from_document, parse_config, update_dashboard_popup_shortcut,
-        update_herdr_notifications, update_ports_row_with_default_rows,
+        dashboard_setup_status_from_document, parse_config, theme_name_from_document,
+        update_dashboard_popup_shortcut, update_herdr_notifications,
+        update_ports_row_with_default_rows,
     };
 
     #[test]
-    fn adds_the_ports_row_to_an_existing_sidebar_layout() {
-        let config =
-            "# retain this comment\n[ui.sidebar.spaces]\nrows = [\n  [\"workspace\"],\n]\n";
+    fn reads_the_configured_herdr_theme_name() {
+        let document = parse_config("[theme]\nname = \"catppuccin-latte\"\n").unwrap();
+        assert_eq!(
+            theme_name_from_document(&document).as_deref(),
+            Some("catppuccin-latte")
+        );
+    }
+
+    #[test]
+    fn adds_the_ports_row_idempotently_without_losing_existing_configuration() {
+        let config = "# retain this comment\n[ui.sidebar.spaces]\nrows = [[\"state_icon\", \"workspace\"], [\"branch\", \"git_status\"]]\n";
         let updated = add_ports_row_to_config(config).unwrap();
         assert!(updated.contains("# retain this comment"));
+        assert!(updated.contains("[\"state_icon\", \"workspace\"]"));
+        assert!(updated.contains("[\"branch\", \"git_status\"]"));
         assert!(updated.contains("[\"$port_forward_status\"]"));
         assert!(updated.parse::<toml_edit::DocumentMut>().is_ok());
+        assert_eq!(add_ports_row_to_config(&updated).unwrap(), updated);
     }
 
     #[test]
@@ -432,21 +453,6 @@ mod sidebar_config_tests {
             Some(default_rows),
         )
         .unwrap();
-        assert!(updated.contains("[\"state_icon\", \"workspace\"]"));
-        assert!(updated.contains("[\"branch\", \"git_status\"]"));
-        assert!(updated.contains("[\"$port_forward_status\"]"));
-    }
-
-    #[test]
-    fn does_not_duplicate_the_ports_row() {
-        let config = "[ui.sidebar.spaces]\nrows = [[\"$port_forward_status\"]]\n";
-        assert_eq!(add_ports_row_to_config(config).unwrap(), config);
-    }
-
-    #[test]
-    fn preserves_all_existing_rows_when_adding_ports() {
-        let config = "[ui.sidebar.spaces]\nrows = [[\"state_icon\", \"workspace\"], [\"branch\", \"git_status\"]]\n";
-        let updated = add_ports_row_to_config(config).unwrap();
         assert!(updated.contains("[\"state_icon\", \"workspace\"]"));
         assert!(updated.contains("[\"branch\", \"git_status\"]"));
         assert!(updated.contains("[\"$port_forward_status\"]"));
@@ -489,16 +495,18 @@ mod sidebar_config_tests {
     }
 
     #[test]
-    fn refuses_to_modify_invalid_toml() {
-        let error = add_ports_row_to_config("[ui\nrows = []\n").unwrap_err();
-        assert!(error.contains("refusing to update invalid TOML"));
-    }
-
-    #[test]
-    fn refuses_to_replace_an_incompatible_rows_value() {
-        let error =
-            add_ports_row_to_config("[ui.sidebar.spaces]\nrows = \"not an array\"\n").unwrap_err();
-        assert!(error.contains("ui.sidebar.spaces.rows exists but is not an array"));
+    fn rejects_invalid_or_incompatible_configuration_without_rewriting_it() {
+        for (config, expected) in [
+            ("[ui\nrows = []\n", "refusing to update invalid TOML"),
+            (
+                "[ui.sidebar.spaces]\nrows = \"not an array\"\n",
+                "ui.sidebar.spaces.rows exists but is not an array",
+            ),
+        ] {
+            assert!(add_ports_row_to_config(config)
+                .unwrap_err()
+                .contains(expected));
+        }
     }
 
     #[test]

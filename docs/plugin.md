@@ -59,19 +59,20 @@ that role is selected:
 The one-click installer pins `hfwd` to the plugin's exact version on that same
 plugin-hosting machine; it cannot install `hfwd` on a separate local connecting
 machine. Install `hfwd` on a separate connector with the root `install.sh` or
-Homebrew. Every installation resets `onboarding = true`. The plugin checkout
-records whether the wrapper installed it during a remote connection; that
-durable metadata selects the remote-origin popup. Closing with **Got it**,
+Homebrew. A missing configuration defaults `onboarding` to `true`; installation,
+reinstallation, and update preserve an existing preference. Separate durable
+state records only a plugin installation first created by `hfwd` on a remote
+host, and selects the remote-origin popup only when its recorded plugin root
+matches the running checkout. Closing with **Got it**,
 **Skip**, `Esc`, or `q` sets only `onboarding = false` in
-`~/.config/herdr-fwd/config.toml`. Reinstalling or updating the plugin resets
-the onboarding state for the new version.
+`~/.config/herdr-fwd/config.toml`.
 
 The shell hook lets users keep entering `herdr --remote <target>`. It routes
 only that command shape through `hfwd` and delegates every other `herdr`
 invocation directly to Herdr.
 
 An active `hfwd` session suppresses onboarding before a remote Herdr
-client attaches. Herdr 0.7.x does not expose client transport identity to
+client attaches. Herdr does not expose client transport identity to
 plugins, so a plain `herdr --remote` connection that does not use `hfwd`
 cannot be distinguished from a local client. See
 [known limitations](limitations.md).
@@ -147,8 +148,8 @@ fallback when that port is busy.
 Manual mappings accept only remote loopback hosts (`localhost`, `127.0.0.1`, or
 `::1`) and always bind
 locally to `127.0.0.1`. Their enabled or paused state is persisted per resolved
-remote hostname under `~/.config/herdr-fwd/`. Multiple remote machines cannot
-inherit one another's mappings.
+remote hostname and named Herdr session under `~/.config/herdr-fwd/`. Multiple
+remote machines or Herdr sessions cannot inherit one another's mappings.
 
 You can also add a manual mapping from the local machine while its session is
 active:

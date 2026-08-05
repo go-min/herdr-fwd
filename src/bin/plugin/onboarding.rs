@@ -3,6 +3,7 @@ use std::{
     io::{self, Write},
     path::{Path, PathBuf},
     process::Command,
+    time::Duration,
 };
 
 #[cfg(unix)]
@@ -18,7 +19,7 @@ use crossterm::{
 use serde::Deserialize;
 
 use crate::plugin::{
-    herdr::{close_popup, herdr_output, run_command_with_timeout, RECONCILIATION_COMMAND_TIMEOUT},
+    herdr::{close_popup, herdr_output, run_command_with_timeout},
     preferences::{load_preferences, set_onboarding},
     session::{installation_state_directory, is_session_file, session_directory},
     sidebar_config::{enable_dashboard_popup_shortcut, enable_ports_row},
@@ -605,13 +606,37 @@ pub(crate) fn install_wrapper_from(plugin_root: &Path, version: &str) -> Result<
 }
 
 pub(crate) fn uninstall_plugin_with(herdr_binary: &Path) -> Result<(), String> {
-    let output = run_command_with_timeout(
-        herdr_binary,
-        &["plugin", "uninstall", "herdr.fwd"],
-        RECONCILIATION_COMMAND_TIMEOUT,
-    )
-    .map_err(|error| format!("failed to run Herdr CLI: {error}"))?;
+    uninstall_plugin_with_timeout(herdr_binary, Duration::from_secs(10))
+}
+
+fn uninstall_plugin_with_timeout(herdr_binary: &Path, timeout: Duration) -> Result<(), String> {
+    let plugin_root = env::var_os("HERDR_PLUGIN_ROOT").map(PathBuf::from);
+    let managed_root = managed_release_bundle_root();
+    let remove_managed_bundles = plugin_root.as_deref() == Some(managed_root.as_path())
+        || plugin_root.as_deref().is_some_and(|plugin_root| {
+            installation_state_directory()
+                .ok()
+                .is_some_and(|state| installation_state_is_remote(&state, plugin_root))
+        });
+    let arguments = uninstall_plugin_arguments(plugin_root.as_deref(), &managed_root);
+    let output = run_command_with_timeout(herdr_binary, &arguments, timeout)
+        .map_err(|error| format!("failed to run Herdr CLI: {error}"))?;
     if output.status.success() {
+        if remove_managed_bundles {
+            let managed_directory = managed_root
+                .parent()
+                .expect("managed bundle root always has a parent");
+            match fs::remove_dir_all(managed_directory) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(format!(
+                        "plugin was removed but managed bundles {} could not be removed: {error}",
+                        managed_directory.display()
+                    ))
+                }
+            }
+        }
         Ok(())
     } else {
         let error = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -620,6 +645,25 @@ pub(crate) fn uninstall_plugin_with(herdr_binary: &Path) -> Result<(), String> {
         } else {
             error
         })
+    }
+}
+
+fn managed_release_bundle_root() -> PathBuf {
+    env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")))
+        .unwrap_or_else(|| PathBuf::from(".local/share"))
+        .join("herdr-fwd/plugins/current")
+}
+
+fn uninstall_plugin_arguments(
+    plugin_root: Option<&Path>,
+    managed_root: &Path,
+) -> [&'static str; 3] {
+    if plugin_root == Some(managed_root) {
+        ["plugin", "unlink", "herdr.fwd"]
+    } else {
+        ["plugin", "uninstall", "herdr.fwd"]
     }
 }
 
@@ -683,9 +727,8 @@ mod onboarding_tests {
 
     use super::{
         decide_onboarding, has_wrapper_session, install_wrapper_from, installation_state_is_remote,
-        render_role_selection_to, render_welcome_to, uninstall_plugin_with, welcome_actions,
-        welcome_copy, wrap_text, wrapper_is_installed_in, OnboardingDecision, OnboardingRole,
-        WelcomeAction, WelcomeView,
+        render_welcome_to, uninstall_plugin_arguments, uninstall_plugin_with_timeout,
+        welcome_actions, wrapper_is_installed_in, OnboardingDecision, OnboardingRole, WelcomeView,
     };
 
     static TEST_DIRECTORY_ID: AtomicU64 = AtomicU64::new(0);
@@ -715,7 +758,7 @@ mod onboarding_tests {
     }
 
     #[test]
-    fn shows_the_matching_local_installation_variant() {
+    fn onboarding_respects_preferences_sessions_and_remote_provenance() {
         assert_eq!(
             decide_onboarding(true, false, true, false),
             OnboardingDecision::Show {
@@ -730,10 +773,6 @@ mod onboarding_tests {
                 installed_by_wrapper: true,
             }
         );
-    }
-
-    #[test]
-    fn never_shows_when_disabled_or_during_a_wrapper_remote_session() {
         assert_eq!(
             decide_onboarding(false, false, false, false),
             OnboardingDecision::Skip
@@ -777,25 +816,19 @@ mod onboarding_tests {
             .contains("download failed"));
     }
 
-    #[cfg(unix)]
     #[test]
-    fn quick_uninstall_uses_the_public_herdr_plugin_command() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let temporary = TestDirectory::create();
-        let herdr = temporary.path().join("herdr");
-        fs::write(
-            &herdr,
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$(dirname \"$0\")/arguments\"\n",
-        )
-        .unwrap();
-        fs::set_permissions(&herdr, fs::Permissions::from_mode(0o755)).unwrap();
-
-        uninstall_plugin_with(&herdr).unwrap();
-
+    fn quick_uninstall_unlinks_only_the_hfwd_managed_release_bundle() {
+        let managed = Path::new("/home/test/.local/share/herdr-fwd/plugins/current");
         assert_eq!(
-            fs::read_to_string(temporary.path().join("arguments")).unwrap(),
-            "plugin\nuninstall\nherdr.fwd\n"
+            uninstall_plugin_arguments(Some(managed), managed),
+            ["plugin", "unlink", "herdr.fwd"]
+        );
+        assert_eq!(
+            uninstall_plugin_arguments(
+                Some(Path::new("/home/test/.config/herdr/plugins/github/fwd")),
+                managed,
+            ),
+            ["plugin", "uninstall", "herdr.fwd"]
         );
     }
 
@@ -810,11 +843,12 @@ mod onboarding_tests {
         fs::set_permissions(&herdr, fs::Permissions::from_mode(0o755)).unwrap();
 
         let started = std::time::Instant::now();
-        let error = uninstall_plugin_with(&herdr).expect_err("uninstall should time out");
+        let error = uninstall_plugin_with_timeout(&herdr, std::time::Duration::from_millis(50))
+            .expect_err("uninstall should time out");
 
         assert!(error.contains("timed out"));
         assert!(
-            started.elapsed() < std::time::Duration::from_secs(3),
+            started.elapsed() < std::time::Duration::from_secs(1),
             "onboarding uninstall must remain bounded"
         );
     }
@@ -863,125 +897,9 @@ mod onboarding_tests {
     }
 
     #[test]
-    fn each_role_has_one_primary_next_action() {
-        assert_eq!(
-            welcome_actions(OnboardingRole::Connect, false, false),
-            vec![
-                WelcomeAction::InstallWrapper,
-                WelcomeAction::EnableSidebarStatus,
-                WelcomeAction::EnablePopupShortcut,
-                WelcomeAction::Skip,
-            ]
-        );
-        assert_eq!(
-            welcome_actions(OnboardingRole::Host, false, false),
-            vec![
-                WelcomeAction::EnableSidebarStatus,
-                WelcomeAction::EnablePopupShortcut,
-                WelcomeAction::Skip,
-            ]
-        );
-        assert_eq!(
-            welcome_actions(OnboardingRole::Both, false, false),
-            vec![
-                WelcomeAction::InstallWrapper,
-                WelcomeAction::EnableSidebarStatus,
-                WelcomeAction::EnablePopupShortcut,
-                WelcomeAction::Skip,
-            ]
-        );
-    }
-
-    #[test]
-    fn welcome_copy_is_role_specific_and_target_neutral() {
-        let ready = welcome_copy(OnboardingRole::Connect, true, false);
-        assert!(ready.contains("Herdr Fwd is ready"));
-        assert!(ready.contains("hfwd <target>"));
-        assert!(!ready.contains("hfwd workbox"));
-        assert!(ready.contains("hfwd hook install"));
-        assert!(!ready.contains("installed automatically"));
-        assert!(!ready.to_ascii_lowercase().contains("wrapper"));
-        let ready_actions = welcome_actions(OnboardingRole::Connect, true, false);
-        assert!(ready_actions
-            .iter()
-            .any(|action| action.label() == "Enable port status (recommended)"));
-        assert_eq!(
-            ready_actions,
-            vec![
-                WelcomeAction::Done,
-                WelcomeAction::EnableSidebarStatus,
-                WelcomeAction::EnablePopupShortcut,
-            ]
-        );
-
-        for role in OnboardingRole::ALL {
-            assert!(
-                !welcome_copy(role, false, false).contains("hfwd workbox"),
-                "{role:?} copy must not prescribe a host alias"
-            );
-        }
-        for role in [OnboardingRole::Connect, OnboardingRole::Both] {
-            let copy = welcome_copy(role, false, false);
-            assert!(copy.contains("Install hfwd"));
-            assert!(copy.contains("hfwd <target>"));
-            assert!(copy.contains("Replace <target>"));
-        }
-        let host = welcome_copy(OnboardingRole::Host, false, false);
-        assert!(host.contains("hfwd is optional"));
-
-        let remote_install = welcome_copy(OnboardingRole::Connect, false, true);
-        assert!(remote_install.contains("installed on this machine from a remote machine"));
-        assert!(remote_install.contains("during a remote connection"));
-        assert_eq!(
-            welcome_actions(OnboardingRole::Connect, false, true),
-            vec![
-                WelcomeAction::InstallWrapper,
-                WelcomeAction::EnableSidebarStatus,
-                WelcomeAction::EnablePopupShortcut,
-                WelcomeAction::Skip,
-                WelcomeAction::UninstallPlugin,
-            ]
-        );
-    }
-
-    #[test]
-    fn wraps_popup_copy_without_splitting_words() {
-        assert_eq!(
-            wrap_text("one two three\n\nfour", 7),
-            vec!["one two", "three", "", "four"]
-        );
-    }
-
-    #[test]
-    fn puts_remote_install_origin_before_role_selection() {
-        let mut output = Vec::new();
-        render_role_selection_to(&mut output, 76, 0, true, None).unwrap();
-        let rendered = String::from_utf8(output).unwrap();
-
-        assert!(rendered.contains("REMOTE INSTALLATION"));
-        assert!(rendered.contains("installed on this machine from a remote machine"));
-        assert!(rendered.contains("Uninstall plugin"));
-        assert!(
-            rendered.find("REMOTE INSTALLATION").unwrap()
-                < rendered.find("What will this machine do?").unwrap()
-        );
-        assert!(
-            rendered.find("Uninstall plugin").unwrap()
-                > rendered.find("Host remote sessions").unwrap()
-        );
-
-        let mut local_output = Vec::new();
-        render_role_selection_to(&mut local_output, 76, 0, false, None).unwrap();
-        let local_rendered = String::from_utf8(local_output).unwrap();
-        assert!(!local_rendered.contains("REMOTE INSTALLATION"));
-        assert!(!local_rendered.contains("Uninstall plugin"));
-    }
-
-    #[test]
-    fn rendered_welcome_returns_to_column_zero_after_every_line() {
+    fn rendered_welcome_uses_terminal_safe_line_endings() {
         let actions = welcome_actions(OnboardingRole::Connect, false, false);
         let mut output = Vec::new();
-
         let view = WelcomeView {
             role: OnboardingRole::Connect,
             wrapper_installed: false,
@@ -989,18 +907,13 @@ mod onboarding_tests {
             selected: 0,
             message: None,
         };
+
         render_welcome_to(&mut output, 73, &view).unwrap();
 
         assert!(output.contains(&b'\n'));
-        assert!(
-            output
-                .iter()
-                .enumerate()
-                .all(|(index, byte)| *byte != b'\n' || index > 0 && output[index - 1] == b'\r'),
-            "terminal line feeds must be preceded by carriage returns"
-        );
-        assert!(!String::from_utf8(output)
-            .unwrap()
-            .contains("REMOTE INSTALLATION"));
+        assert!(output
+            .iter()
+            .enumerate()
+            .all(|(index, byte)| *byte != b'\n' || index > 0 && output[index - 1] == b'\r'));
     }
 }

@@ -1,12 +1,9 @@
-use std::{
-    env, fs,
-    path::{Path, PathBuf},
-    process::Command,
-};
+use std::env;
 
 use crate::local::{
-    ssh::SshClient,
-    support::{plugin_status, secure_random_hex},
+    release::{release_bundle, ReleaseBundle},
+    ssh::{OwnedMaster, SshClient, SSH_DEPLOYMENT_TIMEOUT},
+    support::{require_herdr_compatibility, secure_random_hex, RuntimeDirectory},
 };
 use serde::{Deserialize, Serialize};
 
@@ -14,22 +11,6 @@ use crate::local::support::require_ssh;
 
 const REMOTE_PLUGIN_ID: &str = "herdr.fwd";
 const REMOTE_PLUGIN_SOURCE: &str = "go-min/herdr-fwd";
-
-struct ReleaseCachePaths {
-    binary: PathBuf,
-    checksum: PathBuf,
-}
-
-fn release_cache_paths(base: &Path, version: &str, platform: &str) -> ReleaseCachePaths {
-    let directory = base
-        .join("releases")
-        .join(format!("v{version}"))
-        .join(platform);
-    ReleaseCachePaths {
-        binary: directory.join("herdr-fwd-plugin"),
-        checksum: directory.join("SHA256"),
-    }
-}
 
 pub(crate) fn manage_remote(arguments: &[String]) -> Result<(), String> {
     let operation = arguments
@@ -43,40 +24,26 @@ pub(crate) fn manage_remote(arguments: &[String]) -> Result<(), String> {
     validate_ssh_target(target)?;
     require_ssh()?;
 
-    let command = match operation {
-        "install" | "update" => install_remote_plugin_command(operation == "update"),
-        "status" => remote_prelude(&format!(
-            "herdr plugin list --plugin {REMOTE_PLUGIN_ID} --json"
-        )),
-        "uninstall" => remote_prelude(&format!(
-            "{}; herdr plugin disable {REMOTE_PLUGIN_ID} >/dev/null 2>&1 || true; \
-             herdr plugin uninstall {REMOTE_PLUGIN_ID}",
-            reject_active_sessions_command()
-        )),
-        _ => return Err(remote_management_usage()),
+    let runtime = RuntimeDirectory::create("herdr-fwd-remote-")?;
+    let client = SshClient {
+        target: target.clone(),
+        control_path: runtime.path().join("c"),
     };
+    let master = OwnedMaster::start(client.clone())?;
+    let remote_version = client.remote_command(&remote_prelude("herdr --version"))?;
+    require_herdr_compatibility(&remote_version, "remote")?;
 
-    let current = matches!(operation, "install" | "update")
-        .then(|| remote_plugin_status_for_target(target))
-        .transpose()?
-        .flatten();
-    let previous_origin = current
-        .is_some()
-        .then(|| remote_plugin_origin_for_target(target))
-        .transpose()?
-        .flatten();
-    let output = remote_command_for_target(target, &command)?;
-    if operation == "status" {
-        print!("{output}");
+    match operation {
+        "install" | "update" => ensure_remote_plugin(&client)?,
+        "status" => print!(
+            "{}",
+            client.remote_command(&remote_plugin_status_command())?
+        ),
+        "uninstall" => uninstall_remote_plugin(&client)?,
+        _ => return Err(remote_management_usage()),
     }
-    if matches!(operation, "install" | "update") {
-        let status = remote_plugin_status_for_target(target)?;
-        verify_plugin_status(status, target)?;
-        if should_persist_remote_origin(current.is_none(), previous_origin.as_ref()) {
-            let root = remote_plugin_root_for_target(target)?;
-            remote_command_for_target(target, &persist_remote_origin_command(&root))?;
-        }
-    }
+    drop(master);
+    drop(runtime);
     Ok(())
 }
 
@@ -85,30 +52,242 @@ pub(crate) fn manage_remote(arguments: &[String]) -> Result<(), String> {
 /// this preflight does not create another SSH authentication exchange.
 pub(crate) fn ensure_remote_plugin(client: &SshClient) -> Result<(), String> {
     let current = remote_plugin_status(client)?;
-    if matches!(current, Some((true, ref version)) if version == env!("CARGO_PKG_VERSION")) {
+    if matches!(current, Some(ref status) if status.enabled && status.version == env!("CARGO_PKG_VERSION"))
+    {
         return Ok(());
     }
 
     println!("Preparing remote port forwarding on {}…", client.target);
+    client.remote_command(&remote_prelude(&reject_active_sessions_command()))?;
     let created_by_hfwd = current.is_none();
     let previous_origin = (!created_by_hfwd)
         .then(|| remote_plugin_origin(client))
         .transpose()?
         .flatten();
-    if let Err(remote_error) =
-        client.remote_command(&install_remote_plugin_command(current.is_some()))
-    {
+    let update_owned_by_hfwd = current
+        .as_ref()
+        .zip(previous_origin.as_ref())
+        .is_some_and(|(status, origin)| is_managed_remote_origin(status, origin));
+    if let Err(remote_error) = client.remote_command_with_timeout(
+        &install_remote_plugin_command(current.is_some()),
+        SSH_DEPLOYMENT_TIMEOUT,
+    ) {
+        restore_install_failure_state(client, current.as_ref())?;
         let platform = remote_platform(client)?;
-        let bundle = release_bundle(&platform).map_err(|local_error| format!(
-            "remote plugin install failed ({remote_error}); local verified release fallback is unavailable: {local_error}"
-        ))?;
-        deploy_release_bundle(client, &bundle, created_by_hfwd)?;
+        if remote_release_access(client, &platform).is_ok() {
+            let managed_root = managed_bundle_root(client)?;
+            match current
+                .as_ref()
+                .filter(|status| status.root == managed_root)
+            {
+                Some(previous_bundle) => {
+                    replace_linked_bundle_with_native_install(client, previous_bundle).map_err(
+                        |retry_error| {
+                            format!(
+                                "remote plugin install failed ({remote_error}); linked-bundle migration failed: {retry_error}"
+                            )
+                        },
+                    )?;
+                }
+                None => {
+                    return Err(format!(
+                        "remote plugin install failed even though the exact release is reachable; refusing local fallback: {remote_error}"
+                    ));
+                }
+            }
+        } else {
+            let bundle = release_bundle(&platform).map_err(|local_error| format!(
+                "remote plugin install failed ({remote_error}); local verified release fallback is unavailable: {local_error}"
+            ))?;
+            deploy_release_bundle(client, &bundle, current.as_ref())?;
+        }
     }
     verify_remote_plugin(client)?;
-    if should_persist_remote_origin(created_by_hfwd, previous_origin.as_ref()) {
-        persist_remote_origin(client, &remote_plugin_root(client)?)?;
+    if created_by_hfwd || update_owned_by_hfwd {
+        let installed = required_remote_plugin_status(client)?;
+        if let Err(origin_error) = persist_remote_origin(client, &installed) {
+            if created_by_hfwd {
+                let rollback = remove_remote_plugin(client, &installed)
+                    .and_then(|_| verify_remote_plugin_absent(client))
+                    .and_then(|_| clear_remote_origin(client))
+                    .and_then(|_| clear_managed_bundles(client));
+                return Err(match rollback {
+                    Ok(()) => origin_error,
+                    Err(rollback_error) => format!(
+                        "{origin_error}; newly installed plugin rollback failed: {rollback_error}"
+                    ),
+                });
+            }
+            return Err(origin_error);
+        }
     }
     Ok(())
+}
+
+fn replace_linked_bundle_with_native_install(
+    client: &SshClient,
+    previous: &RemotePluginStatus,
+) -> Result<(), String> {
+    if let Err(error) = client.remote_command_with_timeout(
+        &remote_prelude(&format!("herdr plugin unlink {REMOTE_PLUGIN_ID}")),
+        SSH_DEPLOYMENT_TIMEOUT,
+    ) {
+        return Err(restore_linked_bundle(client, previous, error));
+    }
+    let install = client
+        .remote_command_with_timeout(&install_remote_plugin_command(true), SSH_DEPLOYMENT_TIMEOUT);
+    match install.and_then(|_| verify_remote_plugin(client)) {
+        Ok(()) => Ok(()),
+        Err(error) => Err(restore_linked_bundle(client, previous, error)),
+    }
+}
+
+fn restore_linked_bundle(
+    client: &SshClient,
+    previous: &RemotePluginStatus,
+    install_error: String,
+) -> String {
+    let enabled = if previous.enabled {
+        "--enabled"
+    } else {
+        "--disabled"
+    };
+    let restore = remote_prelude(&format!(
+        "herdr plugin disable {REMOTE_PLUGIN_ID} >/dev/null 2>&1 || true; \
+         herdr plugin uninstall {REMOTE_PLUGIN_ID} >/dev/null 2>&1 || \
+         herdr plugin unlink {REMOTE_PLUGIN_ID} >/dev/null 2>&1 || true; \
+         herdr plugin link {} {enabled}",
+        herdr_fwd::shell::quote(&previous.root)
+    ));
+    match client
+        .remote_command_with_timeout(&restore, SSH_DEPLOYMENT_TIMEOUT)
+        .and_then(|_| {
+            let restored = remote_plugin_status(client)?;
+            (restored.as_ref() == Some(previous))
+                .then_some(())
+                .ok_or_else(|| "restored plugin status does not match the previous bundle".into())
+        }) {
+        Ok(()) => install_error,
+        Err(rollback_error) => {
+            format!("{install_error}; previous linked bundle rollback failed: {rollback_error}")
+        }
+    }
+}
+
+fn restore_install_failure_state(
+    client: &SshClient,
+    previous: Option<&RemotePluginStatus>,
+) -> Result<(), String> {
+    let current = remote_plugin_status(client)?;
+    if current.as_ref() == previous {
+        return Ok(());
+    }
+    match previous {
+        Some(previous) => {
+            let enabled = if previous.enabled {
+                "--enabled"
+            } else {
+                "--disabled"
+            };
+            client.remote_command_with_timeout(
+                &remote_prelude(&format!(
+                    "herdr plugin link {} {enabled}",
+                    herdr_fwd::shell::quote(&previous.root)
+                )),
+                SSH_DEPLOYMENT_TIMEOUT,
+            )?;
+            let restored = remote_plugin_status(client)?;
+            if restored.as_ref() != Some(previous) {
+                return Err(
+                    "remote install failed and the previous plugin state could not be restored"
+                        .into(),
+                );
+            }
+        }
+        None => {
+            client.remote_command_with_timeout(
+                &remote_prelude(&format!(
+                    "herdr plugin disable {REMOTE_PLUGIN_ID} >/dev/null 2>&1 || true; \
+                     herdr plugin uninstall {REMOTE_PLUGIN_ID} >/dev/null 2>&1 || \
+                     herdr plugin unlink {REMOTE_PLUGIN_ID} >/dev/null 2>&1 || true"
+                )),
+                SSH_DEPLOYMENT_TIMEOUT,
+            )?;
+            if remote_plugin_status(client)?.is_some() {
+                return Err(
+                    "remote install failed and its partial plugin registration remains".into(),
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn uninstall_remote_plugin(client: &SshClient) -> Result<(), String> {
+    client.remote_command(&remote_prelude(&reject_active_sessions_command()))?;
+    let Some(current) = remote_plugin_status(client)? else {
+        clear_remote_origin(client)?;
+        return clear_managed_bundles(client);
+    };
+    remove_remote_plugin(client, &current)?;
+    verify_remote_plugin_absent(client)?;
+    clear_remote_origin(client)?;
+    clear_managed_bundles(client)
+}
+
+fn remove_remote_plugin(client: &SshClient, current: &RemotePluginStatus) -> Result<(), String> {
+    let managed_root = managed_bundle_root(client)?;
+    client
+        .remote_command_with_timeout(
+            &remote_plugin_removal_command(current, &managed_root),
+            SSH_DEPLOYMENT_TIMEOUT,
+        )
+        .map(|_| ())
+}
+
+fn managed_bundle_root(client: &SshClient) -> Result<String, String> {
+    client
+        .remote_command(&remote_prelude(
+            "printf '%s' \"${XDG_DATA_HOME:-$HOME/.local/share}/herdr-fwd/plugins/current\"",
+        ))
+        .map(|root| root.trim().to_string())
+}
+
+fn remote_plugin_removal_command(current: &RemotePluginStatus, managed_root: &str) -> String {
+    if current.root == managed_root {
+        remote_prelude(&format!(
+            "herdr plugin unlink {REMOTE_PLUGIN_ID}; rm -rf -- {}",
+            herdr_fwd::shell::quote(managed_root)
+        ))
+    } else {
+        remote_prelude(&format!(
+            "herdr plugin disable {REMOTE_PLUGIN_ID} >/dev/null 2>&1 || true; herdr plugin uninstall {REMOTE_PLUGIN_ID}"
+        ))
+    }
+}
+
+fn verify_remote_plugin_absent(client: &SshClient) -> Result<(), String> {
+    if remote_plugin_status(client)?.is_some() {
+        Err("remote plugin uninstall completed but herdr.fwd is still registered".into())
+    } else {
+        Ok(())
+    }
+}
+
+fn clear_managed_bundles(client: &SshClient) -> Result<(), String> {
+    client
+        .remote_command(&remote_prelude(
+            "rm -rf -- \"${XDG_DATA_HOME:-$HOME/.local/share}/herdr-fwd/plugins\"",
+        ))
+        .map(|_| ())
+}
+
+fn clear_remote_origin(client: &SshClient) -> Result<(), String> {
+    client
+        .remote_command(&remote_prelude(
+            "rm -f -- \"${XDG_STATE_HOME:-$HOME/.local/state}/herdr-fwd/plugin-origin.toml\"",
+        ))
+        .map(|_| ())
 }
 
 fn remote_platform(client: &SshClient) -> Result<String, String> {
@@ -129,17 +308,49 @@ fn remote_platform(client: &SshClient) -> Result<String, String> {
     Ok(format!("{os}-{architecture}"))
 }
 
+fn remote_release_access(client: &SshClient, platform: &str) -> Result<(), String> {
+    client
+        .remote_command_with_timeout(
+            &remote_release_access_command(platform),
+            SSH_DEPLOYMENT_TIMEOUT,
+        )
+        .map(|_| ())
+}
+
+fn remote_release_access_command(platform: &str) -> String {
+    let version = env!("CARGO_PKG_VERSION");
+    let asset = format!("herdr-fwd-{platform}.tar.gz");
+    let base = format!("https://github.com/{REMOTE_PLUGIN_SOURCE}/releases/download/v{version}");
+    remote_prelude(&format!(
+        "command -v git >/dev/null 2>&1; command -v curl >/dev/null 2>&1; \
+         git ls-remote --exit-code https://github.com/{REMOTE_PLUGIN_SOURCE}.git refs/tags/v{version} >/dev/null; \
+         curl -fsSL --connect-timeout 10 --max-time 45 -o /dev/null {asset_url}; \
+         curl -fsSL --connect-timeout 10 --max-time 45 -o /dev/null {sums_url}",
+        asset_url = herdr_fwd::shell::quote(&format!("{base}/{asset}")),
+        sums_url = herdr_fwd::shell::quote(&format!("{base}/SHA256SUMS")),
+    ))
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RemotePluginStatus {
+    enabled: bool,
+    version: String,
+    root: String,
+}
+
 fn verify_remote_plugin(client: &SshClient) -> Result<(), String> {
     verify_plugin_status(remote_plugin_status(client)?, &client.target)
 }
 
-fn verify_plugin_status(status: Option<(bool, String)>, target: &str) -> Result<(), String> {
+fn verify_plugin_status(status: Option<RemotePluginStatus>, target: &str) -> Result<(), String> {
     match status {
-        Some((true, version)) if version == env!("CARGO_PKG_VERSION") => Ok(()),
-        Some((enabled, version)) => Err(format!(
+        Some(status) if status.enabled && status.version == env!("CARGO_PKG_VERSION") => Ok(()),
+        Some(status) => Err(format!(
             "remote plugin setup on {} did not produce the required enabled version {} (enabled={enabled}, version={version})",
             target,
-            env!("CARGO_PKG_VERSION")
+            env!("CARGO_PKG_VERSION"),
+            enabled = status.enabled,
+            version = status.version,
         )),
         None => Err(format!(
             "remote plugin setup on {} completed but herdr.fwd is not registered",
@@ -148,167 +359,117 @@ fn verify_plugin_status(status: Option<(bool, String)>, target: &str) -> Result<
     }
 }
 
-struct ReleaseBundle {
-    manifest: Vec<u8>,
-    binary: Vec<u8>,
-}
-
-fn release_bundle(platform: &str) -> Result<ReleaseBundle, String> {
-    let paths = release_cache_paths(&release_cache_base()?, env!("CARGO_PKG_VERSION"), platform);
-    let binary = download_release_binary(platform, &paths).or_else(|download_error| {
-        verified_cached_binary(&paths)
-            .map_err(|cache_error| format!("{download_error}; offline cache: {cache_error}"))
-    })?;
-    let manifest = deployment_manifest()?.into_bytes();
-    Ok(ReleaseBundle { manifest, binary })
-}
-
-fn release_cache_base() -> Result<PathBuf, String> {
-    env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")))
-        .map(|base| base.join("herdr-fwd"))
-        .ok_or_else(|| "HOME is not set".into())
-}
-
-fn verified_cached_binary(paths: &ReleaseCachePaths) -> Result<Vec<u8>, String> {
-    let binary =
-        fs::read(&paths.binary).map_err(|error| format!("{}: {error}", paths.binary.display()))?;
-    let expected = fs::read_to_string(&paths.checksum)
-        .map_err(|error| format!("{}: {error}", paths.checksum.display()))?;
-    verify_sha256(&binary, expected.trim())?;
-    Ok(binary)
-}
-
-fn download_release_binary(platform: &str, paths: &ReleaseCachePaths) -> Result<Vec<u8>, String> {
-    let temporary = crate::local::support::RuntimeDirectory::create("herdr-fwd-release-")?;
-    let asset = format!("herdr-fwd-{platform}.tar.gz");
-    let archive = temporary.path().join(&asset);
-    let sums = temporary.path().join("SHA256SUMS");
-    let base = format!(
-        "https://github.com/{REMOTE_PLUGIN_SOURCE}/releases/download/v{}",
-        env!("CARGO_PKG_VERSION")
-    );
-    download_file(&format!("{base}/{asset}"), &archive)?;
-    download_file(&format!("{base}/SHA256SUMS"), &sums)?;
-    let expected = checksum_for(
-        &fs::read_to_string(&sums).map_err(|error| error.to_string())?,
-        &asset,
-    )?;
-    verify_sha256(
-        &fs::read(&archive).map_err(|error| error.to_string())?,
-        &expected,
-    )?;
-    let archive_string = archive.display().to_string();
-    let output = Command::new("tar")
-        .args(["-xOzf", &archive_string, "./herdr-fwd-plugin"])
-        .output()
-        .map_err(|error| format!("failed to extract release plugin: {error}"))?;
-    if !output.status.success() || output.stdout.is_empty() {
-        return Err("release archive does not contain herdr-fwd-plugin".into());
-    }
-    let parent = paths
-        .binary
-        .parent()
-        .ok_or_else(|| "invalid release cache path".to_string())?;
-    fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    fs::write(&paths.binary, &output.stdout).map_err(|error| error.to_string())?;
-    fs::write(&paths.checksum, format!("{expected}\n")).map_err(|error| error.to_string())?;
-    Ok(output.stdout)
-}
-
-fn download_file(url: &str, destination: &Path) -> Result<(), String> {
-    let status = Command::new("curl")
-        .args(["-fsSL", "--connect-timeout", "15", "--retry", "2", "-o"])
-        .arg(destination)
-        .arg(url)
-        .status()
-        .map_err(|error| format!("failed to start curl: {error}"))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!("failed to download release asset from {url}"))
-    }
-}
-
-fn checksum_for(sums: &str, asset: &str) -> Result<String, String> {
-    sums.lines()
-        .find_map(|line| {
-            let mut fields = line.split_whitespace();
-            let checksum = fields.next()?;
-            (fields.next()?.trim_start_matches('*') == asset).then(|| checksum.to_string())
-        })
-        .ok_or_else(|| format!("release checksum is missing for {asset}"))
-}
-
-fn verify_sha256(bytes: &[u8], expected: &str) -> Result<(), String> {
-    let temporary = crate::local::support::RuntimeDirectory::create("herdr-fwd-sha-")?;
-    let input = temporary.path().join("input");
-    fs::write(&input, bytes).map_err(|error| error.to_string())?;
-    let output = Command::new("shasum")
-        .args(["-a", "256"])
-        .arg(&input)
-        .output()
-        .or_else(|_| Command::new("sha256sum").arg(&input).output())
-        .map_err(|error| format!("SHA-256 verifier unavailable: {error}"))?;
-    let actual = String::from_utf8_lossy(&output.stdout)
-        .split_whitespace()
-        .next()
-        .unwrap_or("")
-        .to_string();
-    if output.status.success() && actual.eq_ignore_ascii_case(expected) {
-        Ok(())
-    } else {
-        Err("release SHA-256 verification failed".into())
-    }
-}
-
-fn deployment_manifest() -> Result<String, String> {
-    let mut manifest = include_str!("../../../herdr-plugin.toml")
-        .parse::<toml_edit::DocumentMut>()
-        .map_err(|error| format!("invalid bundled plugin manifest: {error}"))?;
-    manifest.remove("build");
-    Ok(manifest.to_string())
+fn required_remote_plugin_status(client: &SshClient) -> Result<RemotePluginStatus, String> {
+    remote_plugin_status(client)?.ok_or_else(|| "remote plugin is not registered".into())
 }
 
 fn deploy_release_bundle(
     client: &SshClient,
     bundle: &ReleaseBundle,
-    _created_by_hfwd: bool,
+    previous_status: Option<&RemotePluginStatus>,
 ) -> Result<(), String> {
     let deployment_id = secure_random_hex(12)?;
     let prepare = local_bundle_command(
         &deployment_id,
         "install -d -m 700 \"$stage/target/release\"",
     );
-    client.remote_command(&prepare)?;
-    client.remote_command_with_stdin(
+    if let Err(error) = client.remote_command_with_timeout(&prepare, SSH_DEPLOYMENT_TIMEOUT) {
+        cleanup_deployment_stage(client, &deployment_id);
+        return Err(error);
+    }
+    if let Err(error) = client.remote_command_with_stdin_timeout(
         &local_bundle_command(&deployment_id, "cat > \"$stage/herdr-plugin.toml\""),
         &bundle.manifest,
-    )?;
-    client.remote_command_with_stdin(
+        SSH_DEPLOYMENT_TIMEOUT,
+    ) {
+        cleanup_deployment_stage(client, &deployment_id);
+        return Err(error);
+    }
+    if let Err(error) = client.remote_command_with_stdin_timeout(
         &local_bundle_command(
             &deployment_id,
             "cat > \"$stage/target/release/herdr-fwd-plugin\"",
         ),
         &bundle.binary,
-    )?;
-    let activate = format!(
-        "chmod 755 \"$stage/target/release/herdr-fwd-plugin\"; current=\"$root/current\"; previous=\"$root/.previous-{deployment_id}\"; if [ -e \"$current\" ]; then mv \"$current\" \"$previous\"; fi; mv \"$stage\" \"$current\"; if ! herdr plugin link \"$current\" --enabled; then rm -rf \"$current\"; if [ -e \"$previous\" ]; then mv \"$previous\" \"$current\"; herdr plugin link \"$current\" --enabled >/dev/null || true; fi; exit 1; fi"
-    );
-    client.remote_command(&local_bundle_command(&deployment_id, &activate))?;
-    if let Err(error) = verify_remote_plugin(client) {
-        let rollback = format!(
-            "current=\"$root/current\"; previous=\"$root/.previous-{deployment_id}\"; rm -rf \"$current\"; if [ -e \"$previous\" ]; then mv \"$previous\" \"$current\"; herdr plugin link \"$current\" --enabled >/dev/null || true; fi"
-        );
-        client.remote_command(&local_bundle_command(&deployment_id, &rollback))?;
+        SSH_DEPLOYMENT_TIMEOUT,
+    ) {
+        cleanup_deployment_stage(client, &deployment_id);
         return Err(error);
     }
-    client.remote_command(&local_bundle_command(
-        &deployment_id,
-        &format!("rm -rf \"$root/.previous-{deployment_id}\""),
-    ))?;
+    let activate = format!(
+        "chmod 755 \"$stage/target/release/herdr-fwd-plugin\"; current=\"$root/current\"; previous=\"$root/.previous-{deployment_id}\"; if [ -e \"$current\" ]; then mv \"$current\" \"$previous\"; fi; mv \"$stage\" \"$current\"; herdr plugin link \"$current\" --enabled"
+    );
+    if let Err(error) = client.remote_command_with_timeout(
+        &local_bundle_command(&deployment_id, &activate),
+        SSH_DEPLOYMENT_TIMEOUT,
+    ) {
+        return Err(rollback_deployment(
+            client,
+            &deployment_id,
+            previous_status,
+            error,
+        ));
+    }
+    if let Err(error) = verify_remote_plugin(client) {
+        return Err(rollback_deployment(
+            client,
+            &deployment_id,
+            previous_status,
+            error,
+        ));
+    }
+    if let Err(error) = client.remote_command_with_timeout(
+        &local_bundle_command(
+            &deployment_id,
+            &format!("rm -rf \"$root/.previous-{deployment_id}\""),
+        ),
+        SSH_DEPLOYMENT_TIMEOUT,
+    ) {
+        eprintln!("warning: remote plugin activated but old bundle cleanup failed: {error}");
+    }
     Ok(())
+}
+
+fn cleanup_deployment_stage(client: &SshClient, deployment_id: &str) {
+    let _ = client.remote_command_with_timeout(
+        &local_bundle_command(deployment_id, "rm -rf -- \"$stage\""),
+        SSH_DEPLOYMENT_TIMEOUT,
+    );
+}
+
+fn rollback_deployment(
+    client: &SshClient,
+    deployment_id: &str,
+    previous_status: Option<&RemotePluginStatus>,
+    deployment_error: String,
+) -> String {
+    let restore_registration = previous_status.map_or_else(String::new, |status| {
+        let previous_root = herdr_fwd::shell::quote(&status.root);
+        let enabled = if status.enabled {
+            "--enabled"
+        } else {
+            "--disabled"
+        };
+        format!(
+            "previous_root={previous_root}; if [ \"$previous_root\" = \"$current\" ]; then previous_root=\"$current\"; fi; herdr plugin link \"$previous_root\" {enabled}"
+        )
+    });
+    let rollback = format!(
+        "current=\"$root/current\"; previous=\"$root/.previous-{deployment_id}\"; \
+         herdr plugin unlink {REMOTE_PLUGIN_ID} >/dev/null 2>&1 || true; \
+         rm -rf -- \"$current\" \"$stage\"; \
+         if [ -e \"$previous\" ]; then mv \"$previous\" \"$current\"; fi; \
+         {restore_registration}"
+    );
+    match client.remote_command_with_timeout(
+        &local_bundle_command(deployment_id, &rollback),
+        SSH_DEPLOYMENT_TIMEOUT,
+    ) {
+        Ok(_) => deployment_error,
+        Err(rollback_error) => {
+            format!("{deployment_error}; previous plugin rollback failed: {rollback_error}")
+        }
+    }
 }
 
 fn local_bundle_command(deployment_id: &str, command: &str) -> String {
@@ -317,92 +478,89 @@ fn local_bundle_command(deployment_id: &str, command: &str) -> String {
     ))
 }
 
-fn remote_plugin_status(client: &SshClient) -> Result<Option<(bool, String)>, String> {
-    let status = client.remote_command(&remote_prelude(&format!(
+fn remote_plugin_status_command() -> String {
+    remote_prelude(&format!(
         "herdr plugin list --plugin {REMOTE_PLUGIN_ID} --json"
-    )))?;
+    ))
+}
+
+fn remote_plugin_status(client: &SshClient) -> Result<Option<RemotePluginStatus>, String> {
+    let status = client.remote_command(&remote_plugin_status_command())?;
     let value = serde_json::from_str::<serde_json::Value>(&status)
         .map_err(|error| format!("invalid remote plugin status: {error}"))?;
-    Ok(plugin_status(&value))
+    remote_plugin_status_from_json(&value)
 }
 
-fn remote_plugin_root(client: &SshClient) -> Result<String, String> {
-    let status = client.remote_command(&remote_prelude(&format!(
-        "herdr plugin list --plugin {REMOTE_PLUGIN_ID} --json"
-    )))?;
-    let value = serde_json::from_str::<serde_json::Value>(&status)
-        .map_err(|error| format!("invalid remote plugin status: {error}"))?;
-    plugin_root(&value).ok_or_else(|| "remote plugin status has no plugin_root".into())
-}
-
-fn remote_plugin_status_for_target(target: &str) -> Result<Option<(bool, String)>, String> {
-    let status = remote_command_for_target(
-        target,
-        &remote_prelude(&format!(
-            "herdr plugin list --plugin {REMOTE_PLUGIN_ID} --json"
-        )),
-    )?;
-    let value = serde_json::from_str::<serde_json::Value>(&status)
-        .map_err(|error| format!("invalid remote plugin status: {error}"))?;
-    Ok(plugin_status(&value))
-}
-
-fn remote_plugin_root_for_target(target: &str) -> Result<String, String> {
-    let status = remote_command_for_target(
-        target,
-        &remote_prelude(&format!(
-            "herdr plugin list --plugin {REMOTE_PLUGIN_ID} --json"
-        )),
-    )?;
-    let value = serde_json::from_str::<serde_json::Value>(&status)
-        .map_err(|error| format!("invalid remote plugin status: {error}"))?;
-    plugin_root(&value).ok_or_else(|| "remote plugin status has no plugin_root".into())
-}
-
-fn remote_command_for_target(target: &str, command: &str) -> Result<String, String> {
-    let output = Command::new("ssh")
-        .arg(target)
-        .arg(command)
-        .output()
-        .map_err(|error| format!("failed to start ssh: {error}"))?;
-    if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-    } else {
-        Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
-    }
-}
-
-fn plugin_root(value: &serde_json::Value) -> Option<String> {
+fn remote_plugin_status_from_json(
+    value: &serde_json::Value,
+) -> Result<Option<RemotePluginStatus>, String> {
     match value {
         serde_json::Value::Object(object)
             if object.get("plugin_id").and_then(serde_json::Value::as_str)
                 == Some(REMOTE_PLUGIN_ID) =>
         {
-            object
+            let root = object
                 .get("plugin_root")
                 .and_then(serde_json::Value::as_str)
-                .map(str::to_string)
+                .ok_or_else(|| "remote plugin status has no plugin_root".to_string())?;
+            Ok(Some(RemotePluginStatus {
+                enabled: object
+                    .get("enabled")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false),
+                version: object
+                    .get("version")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("unknown")
+                    .to_string(),
+                root: root.to_string(),
+            }))
         }
-        serde_json::Value::Object(object) => object.values().find_map(plugin_root),
-        serde_json::Value::Array(values) => values.iter().find_map(plugin_root),
-        _ => None,
+        serde_json::Value::Object(object) => {
+            for value in object.values() {
+                if let Some(status) = remote_plugin_status_from_json(value)? {
+                    return Ok(Some(status));
+                }
+            }
+            Ok(None)
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                if let Some(status) = remote_plugin_status_from_json(value)? {
+                    return Ok(Some(status));
+                }
+            }
+            Ok(None)
+        }
+        _ => Ok(None),
     }
 }
 
-fn persist_remote_origin(client: &SshClient, plugin_root: &str) -> Result<(), String> {
-    client
-        .remote_command(&persist_remote_origin_command(plugin_root))
-        .map(|_| ())
+fn persist_remote_origin(client: &SshClient, installed: &RemotePluginStatus) -> Result<(), String> {
+    let command_error = client
+        .remote_command(&persist_remote_origin_command(&installed.root))
+        .err();
+    let persisted = remote_plugin_origin(client)?;
+    if persisted
+        .as_ref()
+        .is_some_and(|origin| is_managed_remote_origin(installed, origin))
+    {
+        Ok(())
+    } else {
+        Err(command_error.unwrap_or_else(|| {
+            "remote plugin provenance was not persisted after verified activation".into()
+        }))
+    }
 }
 
 fn persist_remote_origin_command(plugin_root: &str) -> String {
     let contents = herdr_fwd::shell::quote(&remote_origin_contents(plugin_root));
     remote_prelude(&format!(
-        "state=\"${{XDG_STATE_HOME:-$HOME/.local/state}}/herdr-fwd\"; install -d -m 700 \"$state\"; temporary=\"$state/.plugin-origin.toml.$$\"; umask 077; printf '%s' {contents} > \"$temporary\"; mv -f \"$temporary\" \"$state/plugin-origin.toml\""
+        "state=\"${{XDG_STATE_HOME:-$HOME/.local/state}}/herdr-fwd\"; install -d -m 700 \"$state\"; temporary=\"$state/.plugin-origin.toml.$$\"; trap 'rm -f -- \"$temporary\"' EXIT HUP INT TERM; umask 077; printf '%s' {contents} > \"$temporary\"; mv -f \"$temporary\" \"$state/plugin-origin.toml\"; trap - EXIT HUP INT TERM"
     ))
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 struct RemotePluginOrigin {
     origin: String,
     plugin_root: String,
@@ -423,46 +581,30 @@ fn remote_plugin_origin(client: &SshClient) -> Result<Option<RemotePluginOrigin>
     Ok(toml_edit::de::from_str(&contents).ok())
 }
 
-fn remote_plugin_origin_for_target(target: &str) -> Result<Option<RemotePluginOrigin>, String> {
-    let contents = remote_command_for_target(target, &remote_plugin_origin_command())?;
-    Ok(toml_edit::de::from_str(&contents).ok())
-}
-
 fn remote_plugin_origin_command() -> String {
     remote_prelude(
         "origin=\"${XDG_STATE_HOME:-$HOME/.local/state}/herdr-fwd/plugin-origin.toml\"; if [ -f \"$origin\" ]; then cat \"$origin\"; fi",
     )
 }
 
-fn should_persist_remote_origin(
-    created_by_hfwd: bool,
-    previous_origin: Option<&RemotePluginOrigin>,
-) -> bool {
-    created_by_hfwd || previous_origin.is_some_and(|origin| origin.origin == "hfwd_remote")
+fn is_managed_remote_origin(status: &RemotePluginStatus, origin: &RemotePluginOrigin) -> bool {
+    origin.origin == "hfwd_remote"
+        && origin.plugin_root == status.root
+        && origin.version == status.version
 }
 
 fn install_remote_plugin_command(is_update: bool) -> String {
-    let mut steps = vec![reject_active_sessions_command()];
-    steps.extend([
-        "command -v git >/dev/null 2>&1 || { echo 'error: remote git is required' >&2; exit 127; }"
-            .into(),
-        format!(
-            "git ls-remote --exit-code https://github.com/{REMOTE_PLUGIN_SOURCE}.git refs/tags/v{} >/dev/null || {{ echo 'error: remote cannot reach required Herdr Fwd tag v{}' >&2; exit 1; }}",
-            env!("CARGO_PKG_VERSION"),
-            env!("CARGO_PKG_VERSION")
-        ),
-        "command -v curl >/dev/null 2>&1 || { echo 'error: remote curl is required to install the plugin binary' >&2; exit 127; }"
-            .into(),
+    let mut steps = vec![
         format!(
             "HERDR_FWD_MANAGED_REMOTE_INSTALL=1 herdr plugin install {REMOTE_PLUGIN_SOURCE} --ref v{} --yes",
             env!("CARGO_PKG_VERSION")
         ),
         format!("herdr plugin enable {REMOTE_PLUGIN_ID}"),
         format!("herdr plugin list --plugin {REMOTE_PLUGIN_ID} --json"),
-    ]);
+    ];
     if is_update {
         steps.insert(
-            1,
+            0,
             "echo 'Updating managed remote port-forward plugin…'".into(),
         );
     }
@@ -478,7 +620,7 @@ fn remote_prelude(command: &str) -> String {
 }
 
 fn reject_active_sessions_command() -> String {
-    "if find \"$HOME/.cache/herdr-fwd\" -maxdepth 1 -name 'session-*.json' \
+    "if find \"$HOME/.cache/herdr-fwd\" -name 'session-*.json' \
      ! -name '*.dashboard.json' -type f -print -quit 2>/dev/null | grep -q .; then \
      echo 'error: an active remote-forward session exists; disconnect it before update/uninstall' >&2; \
      exit 1; fi"
@@ -504,10 +646,11 @@ fn remote_management_usage() -> String {
 
 #[cfg(test)]
 mod remote_management_tests {
+    use crate::local::release::deployment_manifest;
+
     use super::{
-        deployment_manifest, install_remote_plugin_command, local_bundle_command,
-        reject_active_sessions_command, remote_origin_contents, should_persist_remote_origin,
-        validate_ssh_target, RemotePluginOrigin, REMOTE_PLUGIN_ID, REMOTE_PLUGIN_SOURCE,
+        is_managed_remote_origin, remote_plugin_removal_command, validate_ssh_target,
+        RemotePluginOrigin, RemotePluginStatus,
     };
     #[test]
     fn validates_remote_management_targets() {
@@ -519,36 +662,31 @@ mod remote_management_tests {
     }
 
     #[test]
-    fn remote_install_command_has_only_fixed_plugin_identifiers() {
-        let command = install_remote_plugin_command(false);
-        assert!(command.contains(REMOTE_PLUGIN_SOURCE));
-        assert!(command.contains(REMOTE_PLUGIN_ID));
-        assert!(command.contains("plugin install"));
-        assert!(command.contains("HERDR_FWD_MANAGED_REMOTE_INSTALL=1"));
-        assert!(!command.contains("HERDR_FWD_INSTALLED_BY_WRAPPER"));
-        assert!(command.contains("git ls-remote --exit-code"));
-        assert!(command.contains(&format!("refs/tags/v{}", env!("CARGO_PKG_VERSION"))));
-        assert!(!command.contains("installation_source"));
-        assert!(command.contains(&format!("--ref v{}", env!("CARGO_PKG_VERSION"))));
-        assert!(command.contains(&reject_active_sessions_command()));
-
-        let update = install_remote_plugin_command(true);
-        assert!(update.contains(&reject_active_sessions_command()));
+    fn parses_the_exact_remote_plugin_root_for_rollback_and_uninstall() {
+        let value = serde_json::json!({"result": {"plugins": [{
+            "plugin_id": "herdr.fwd",
+            "enabled": true,
+            "version": env!("CARGO_PKG_VERSION"),
+            "plugin_root": "/home/demo/.local/share/herdr-fwd/plugins/current"
+        }]}});
+        let status = super::remote_plugin_status_from_json(&value)
+            .unwrap()
+            .unwrap();
+        assert!(status.enabled);
+        assert_eq!(status.version, env!("CARGO_PKG_VERSION"));
+        assert_eq!(
+            status.root,
+            "/home/demo/.local/share/herdr-fwd/plugins/current"
+        );
     }
 
     #[test]
-    fn remote_origin_contents_is_valid_toml_for_a_plugin_root() {
-        let plugin_root = "/Users/example/.config/herdr/plugins/github/herdr.fwd-abc";
-        let contents = remote_origin_contents(plugin_root);
-        let origin = toml_edit::de::from_str::<serde_json::Value>(&contents).unwrap();
-
-        assert_eq!(origin["origin"], "hfwd_remote");
-        assert_eq!(origin["plugin_root"], plugin_root);
-        assert_eq!(origin["version"], env!("CARGO_PKG_VERSION"));
-    }
-
-    #[test]
-    fn refreshes_provenance_only_for_hfwd_created_or_managed_plugins() {
+    fn recognizes_provenance_only_for_the_exact_pre_update_plugin() {
+        let current = RemotePluginStatus {
+            enabled: true,
+            version: "0.1.3".into(),
+            root: "/previous/root".into(),
+        };
         let managed = RemotePluginOrigin {
             origin: "hfwd_remote".into(),
             plugin_root: "/previous/root".into(),
@@ -560,41 +698,42 @@ mod remote_management_tests {
             version: "0.1.3".into(),
         };
 
-        assert!(should_persist_remote_origin(true, None));
-        assert!(should_persist_remote_origin(false, Some(&managed)));
-        assert!(!should_persist_remote_origin(false, Some(&manual)));
-        assert!(!should_persist_remote_origin(false, None));
+        assert!(is_managed_remote_origin(&current, &managed));
+        assert!(!is_managed_remote_origin(&current, &manual));
+
+        let mut stale_root = managed.clone();
+        stale_root.plugin_root = "/manual/root".into();
+        assert!(!is_managed_remote_origin(&current, &stale_root));
+
+        let mut stale_version = managed;
+        stale_version.version = "0.1.2".into();
+        assert!(!is_managed_remote_origin(&current, &stale_version));
     }
 
     #[test]
-    fn active_session_guard_ignores_dashboard_markers() {
-        let command = reject_active_sessions_command();
-        assert!(command.contains("! -name '*.dashboard.json'"));
-    }
-
-    #[test]
-    fn local_bundle_uses_a_managed_remote_path_without_a_build_hook() {
+    fn fallback_manifest_never_triggers_a_remote_build() {
         let manifest = deployment_manifest().unwrap();
         assert!(!manifest.contains("[[build]]"));
         assert!(manifest.contains("herdr-fwd-plugin"));
-
-        let command = local_bundle_command("abc123", "cat > \"$stage/plugin\"");
-        assert!(command.contains(".local/share"));
-        assert!(command.contains(".staging-abc123"));
-        assert!(command.contains("cat > \"$stage/plugin\""));
     }
 
     #[test]
-    fn release_cache_is_scoped_to_the_exact_version_and_platform() {
-        let paths =
-            super::release_cache_paths(std::path::Path::new("/cache"), "0.1.2", "linux-aarch64");
-        assert_eq!(
-            paths.binary,
-            std::path::PathBuf::from("/cache/releases/v0.1.2/linux-aarch64/herdr-fwd-plugin")
-        );
-        assert_eq!(
-            paths.checksum,
-            std::path::PathBuf::from("/cache/releases/v0.1.2/linux-aarch64/SHA256")
-        );
+    fn removal_unlinks_only_the_exact_managed_fallback_root() {
+        let managed_root = "/home/demo/.local/share/herdr-fwd/plugins/current";
+        let mut status = RemotePluginStatus {
+            enabled: true,
+            version: env!("CARGO_PKG_VERSION").into(),
+            root: managed_root.into(),
+        };
+
+        let managed = remote_plugin_removal_command(&status, managed_root);
+        assert!(managed.contains("plugin unlink"));
+        assert!(managed.contains("rm -rf"));
+        assert!(!managed.contains("plugin uninstall"));
+
+        status.root = "/home/demo/.config/herdr/plugins/github/herdr.fwd".into();
+        let github = remote_plugin_removal_command(&status, managed_root);
+        assert!(github.contains("plugin uninstall"));
+        assert!(!github.contains("rm -rf"));
     }
 }

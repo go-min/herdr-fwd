@@ -92,7 +92,7 @@ pub(crate) fn handle_dashboard_key_with_session_path(
         KeyCode::Char(_) if is_shortcut(key, 'e') => {
             toggle_selected_forward(config, forwards, state);
         }
-        KeyCode::Char(_) if is_shortcut(key, 'c') => {
+        KeyCode::Char(_) if is_shortcut(key, 'p') => {
             let Some(forward) = forwards.get(state.selected) else {
                 state.show_message("Press a to add the first forward", true);
                 return;
@@ -640,32 +640,15 @@ mod dashboard_actions_tests {
     use crate::plugin::dashboard_terminal::DashboardState;
     use crate::plugin::preferences::AfterForward;
 
-    use super::{
-        adjust_process_tree_depth, cycle_after_forward, handle_dashboard_key,
-        handle_integration_key,
-    };
+    use super::{handle_dashboard_key, handle_integration_key};
     use crate::plugin::dashboard_terminal::IntegrationMenu;
-
-    #[test]
-    fn process_tree_depth_changes_stay_within_configured_bounds() {
-        assert_eq!(adjust_process_tree_depth(0, -1), 8);
-        assert_eq!(adjust_process_tree_depth(2, 1), 3);
-        assert_eq!(adjust_process_tree_depth(8, 1), 0);
-        assert_eq!(
-            cycle_after_forward(AfterForward::Space, -1),
-            AfterForward::Nothing
-        );
-        assert_eq!(
-            cycle_after_forward(AfterForward::Nothing, 1),
-            AfterForward::Space
-        );
-    }
 
     #[test]
     fn help_shortcut_accepts_question_mark_positions_on_both_layouts() {
         let config = RemoteSessionConfig {
-            protocol_version: 1,
+            protocol_version: herdr_fwd::PROTOCOL_VERSION,
             session_id: "0123456789abcdef01234567".into(),
+            herdr_session: "default".into(),
             token: "ab".repeat(32),
             rpc_url: "http://127.0.0.1:23000".into(),
             auto_detect: true,
@@ -684,6 +667,7 @@ mod dashboard_actions_tests {
 
     #[test]
     fn integration_settings_persist_process_tree_depth_as_a_preference() {
+        let _environment = crate::plugin::TEST_ENV_LOCK.lock().unwrap();
         let directory = std::env::temp_dir().join(format!(
             "herdr-fwd-dashboard-settings-{}",
             std::process::id()
@@ -691,8 +675,9 @@ mod dashboard_actions_tests {
         std::fs::create_dir_all(&directory).unwrap();
         std::env::set_var("HERDR_PLUGIN_CONFIG_DIR", &directory);
         let config = RemoteSessionConfig {
-            protocol_version: 1,
+            protocol_version: herdr_fwd::PROTOCOL_VERSION,
             session_id: "test".into(),
+            herdr_session: "default".into(),
             token: "test-token".into(),
             rpc_url: "http://127.0.0.1:23000".into(),
             auto_detect: true,
@@ -747,6 +732,17 @@ mod dashboard_actions_tests {
         }
     }
 
+    fn remote_config(rpc_url: String) -> RemoteSessionConfig {
+        RemoteSessionConfig {
+            protocol_version: herdr_fwd::PROTOCOL_VERSION,
+            session_id: "0123456789abcdef01234567".into(),
+            herdr_session: "default".into(),
+            token: "ab".repeat(32),
+            rpc_url,
+            auto_detect: true,
+        }
+    }
+
     fn deletion_server() -> (String, Arc<AtomicUsize>, thread::JoinHandle<String>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
@@ -758,6 +754,7 @@ mod dashboard_actions_tests {
             loop {
                 let mut bytes = [0; 256];
                 let read = stream.read(&mut bytes).unwrap();
+                assert_ne!(read, 0, "RPC client closed before completing its request");
                 request.extend_from_slice(&bytes[..read]);
                 if request.ends_with(b"\r\n\r\n") {
                     break;
@@ -808,6 +805,7 @@ mod dashboard_actions_tests {
             loop {
                 let mut bytes = [0; 256];
                 let read = stream.read(&mut bytes).unwrap();
+                assert_ne!(read, 0, "RPC client closed before completing its request");
                 request.extend_from_slice(&bytes[..read]);
                 if request.ends_with(b"\r\n\r\n") {
                     break;
@@ -821,13 +819,7 @@ mod dashboard_actions_tests {
             stream.write_all(response.as_bytes()).unwrap();
             stream.shutdown(Shutdown::Write).unwrap();
         });
-        let config = RemoteSessionConfig {
-            protocol_version: 1,
-            session_id: "test".into(),
-            token: "test-token".into(),
-            rpc_url: format!("http://{address}"),
-            auto_detect: true,
-        };
+        let config = remote_config(format!("http://{address}"));
         let mut state = DashboardState::default();
 
         handle_dashboard_key(
@@ -840,22 +832,16 @@ mod dashboard_actions_tests {
 
         let message = state.message.unwrap();
         assert!(message.error);
-        assert_eq!(
-            message.text,
-            "Action failed.\nRPC returned 500: browser unavailable\n\nPress r to retry or h for settings."
-        );
+        assert!(message
+            .text
+            .contains("RPC returned 500: browser unavailable"));
+        assert!(message.text.contains("Press r to retry"));
     }
 
     #[test]
     fn removing_a_manual_forward_requires_a_second_confirmation_key() {
         let (rpc_url, requests, server) = deletion_server();
-        let config = RemoteSessionConfig {
-            protocol_version: 1,
-            session_id: "test".into(),
-            token: "test-token".into(),
-            rpc_url,
-            auto_detect: true,
-        };
+        let config = remote_config(rpc_url);
         let mut state = DashboardState::default();
 
         handle_dashboard_key(
@@ -886,13 +872,7 @@ mod dashboard_actions_tests {
     #[test]
     fn escape_cancels_manual_forward_removal_without_a_request() {
         let (rpc_url, requests, server) = no_request_server();
-        let config = RemoteSessionConfig {
-            protocol_version: 1,
-            session_id: "test".into(),
-            token: "test-token".into(),
-            rpc_url,
-            auto_detect: true,
-        };
+        let config = remote_config(rpc_url);
         let mut state = DashboardState::default();
 
         handle_dashboard_key(

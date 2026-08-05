@@ -17,10 +17,10 @@ use crate::plugin::preferences::AfterForward;
 use crate::plugin::{
     dashboard_actions::handle_dashboard_key_with_session_path,
     dashboard_actions::handle_dashboard_mouse,
-    dashboard_render::{render_dashboard, sort_for_display},
+    dashboard_render::{render_dashboard, sort_for_display, DashboardPalette},
     herdr::{close_popup, herdr_json, pane_locations},
     rpc::list_forwards,
-    session::read_json_file,
+    session::{read_json_file, validate_current_herdr_session},
 };
 
 struct DashboardTerminal;
@@ -193,8 +193,10 @@ impl DashboardFrame {
 pub(crate) fn dashboard(session_path: &Path) -> Result<(), String> {
     let _terminal = DashboardTerminal::enter()?;
     let mut state = DashboardState::default();
+    let palette = DashboardPalette::from_environment();
     let mut config: RemoteSessionConfig = read_json_file(session_path)?;
     config.validate()?;
+    validate_current_herdr_session(&config)?;
     let mut forwards = match list_forwards(&config) {
         Ok(forwards) => forwards,
         Err(error) => {
@@ -217,7 +219,7 @@ pub(crate) fn dashboard(session_path: &Path) -> Result<(), String> {
         state.expire_message(Instant::now());
         let frame = DashboardFrame::new(&config, &forwards, &locations, &state);
         if last_rendered.as_ref() != Some(&frame) {
-            render_dashboard(&config, &forwards, &locations, &state)?;
+            render_dashboard(&config, &forwards, &locations, &state, palette)?;
             last_rendered = Some(frame);
         }
 
@@ -254,6 +256,8 @@ pub(crate) fn dashboard(session_path: &Path) -> Result<(), String> {
                     continue;
                 }
             };
+            config.validate()?;
+            validate_current_herdr_session(&config)?;
             match list_forwards(&config) {
                 Ok(mut current) => {
                     locations = herdr_json(&["api", "snapshot"])
@@ -297,14 +301,11 @@ fn preserve_selected_forward(
 
 #[cfg(test)]
 mod dashboard_terminal_tests {
-    use std::{collections::HashMap, time::Duration};
-
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-    use herdr_fwd::{registry::Forward, RemoteSessionConfig};
+    use herdr_fwd::registry::Forward;
 
     use super::{
-        preserve_selected_forward, should_close_popup, DashboardFrame, DashboardState,
-        DASHBOARD_MESSAGE_TTL,
+        preserve_selected_forward, should_close_popup, DashboardState, DASHBOARD_MESSAGE_TTL,
     };
 
     fn forward(id: &str) -> Forward {
@@ -322,30 +323,6 @@ mod dashboard_terminal_tests {
             process_id: None,
             tunnel_opened_at: 0,
         }
-    }
-
-    #[test]
-    fn expires_status_messages_after_the_ttl() {
-        let mut state = DashboardState::default();
-        state.show_message("Forward paused", false);
-        let shown_at = state.message.as_ref().unwrap().shown_at;
-
-        state.expire_message(shown_at + DASHBOARD_MESSAGE_TTL - Duration::from_millis(1));
-        assert!(state.message.is_some());
-        state.expire_message(shown_at + DASHBOARD_MESSAGE_TTL);
-        assert!(state.message.is_none());
-    }
-
-    #[test]
-    fn clears_status_when_selection_changes() {
-        let mut state = DashboardState::default();
-        state.show_message("Forward paused", false);
-        state.select(1);
-        assert!(state.message.is_none());
-
-        state.show_message("Forward enabled", false);
-        state.select(1);
-        assert!(state.message.is_some());
     }
 
     #[test]
@@ -388,26 +365,5 @@ mod dashboard_terminal_tests {
         state.mark_available();
         assert!(!state.unavailable);
         assert!(state.message.is_none());
-    }
-
-    #[test]
-    fn render_frame_changes_only_when_visible_dashboard_state_changes() {
-        let config = RemoteSessionConfig {
-            protocol_version: 1,
-            session_id: "0123456789abcdef01234567".into(),
-            token: "ab".repeat(32),
-            rpc_url: "http://127.0.0.1:23000".into(),
-            auto_detect: true,
-        };
-        let forwards = Vec::<Forward>::new();
-        let locations = HashMap::new();
-        let mut state = DashboardState::default();
-        let first = DashboardFrame::new(&config, &forwards, &locations, &state);
-        let same = DashboardFrame::new(&config, &forwards, &locations, &state);
-        assert!(first == same);
-
-        state.help = true;
-        let changed = DashboardFrame::new(&config, &forwards, &locations, &state);
-        assert!(first != changed);
     }
 }

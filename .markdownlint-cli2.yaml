@@ -4,4 +4,9 @@ config:
     tables: false
   MD024:
     siblings_only: true
+  MD033:
+    allowed_elements:
+      - img
+      - picture
+      - source
   MD060: false

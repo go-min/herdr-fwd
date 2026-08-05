@@ -1,7 +1,6 @@
 use std::{
     env, fs,
-    fs::OpenOptions,
-    io::{Read, Write},
+    io::Read,
     net::TcpListener,
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -10,7 +9,7 @@ use std::{
 use serde::Serialize;
 
 #[cfg(unix)]
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 
 use crate::local::{
     companion::establish_reverse_rpc,
@@ -96,20 +95,8 @@ pub(crate) fn state_directory() -> Result<PathBuf, String> {
 }
 
 pub(crate) fn write_private_json<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
-    let temporary = path.with_extension("json.tmp");
     let bytes = serde_json::to_vec(value).map_err(|error| error.to_string())?;
-    let mut options = OpenOptions::new();
-    options.create(true).truncate(true).write(true);
-    #[cfg(unix)]
-    options.mode(0o600);
-    let mut file = options
-        .open(&temporary)
-        .map_err(|error| format!("failed to write {}: {error}", temporary.display()))?;
-    file.write_all(&bytes)
-        .and_then(|_| file.sync_all())
-        .map_err(|error| format!("failed to persist {}: {error}", temporary.display()))?;
-    fs::rename(&temporary, path)
-        .map_err(|error| format!("failed to commit {}: {error}", path.display()))
+    herdr_fwd::atomic::write_file(path, &bytes, 0o600)
 }
 
 pub(crate) fn secure_random_hex(bytes: usize) -> Result<String, String> {
@@ -268,9 +255,9 @@ pub(crate) fn require_herdr_compatibility(
         .split_whitespace()
         .find_map(parse_version)
         .ok_or_else(|| format!("could not parse {location} Herdr version: {version_output}"))?;
-    if !((0, 7, 5)..(0, 8, 0)).contains(&version) {
+    if !((0, 8, 0)..(0, 9, 0)).contains(&version) {
         Err(format!(
-            "{location} Herdr {}.{}.{} is unsupported; this release supports >=0.7.5 and <0.8.0",
+            "{location} Herdr {}.{}.{} is unsupported; this release supports >=0.8.0 and <0.9.0",
             version.0, version.1, version.2
         ))
     } else {
@@ -313,9 +300,10 @@ mod support_tests {
     fn checks_herdr_semantic_version() {
         assert_eq!(parse_version("v0.7.5"), Some((0, 7, 5)));
         assert_eq!(parse_version("0.8.0-beta.1"), Some((0, 8, 0)));
-        assert!(require_herdr_compatibility("herdr 0.7.5", "test").is_ok());
+        assert!(require_herdr_compatibility("herdr 0.7.5", "test").is_err());
         assert!(require_herdr_compatibility("herdr 0.7.4", "test").is_err());
-        assert!(require_herdr_compatibility("herdr 0.8.0", "test").is_err());
+        assert!(require_herdr_compatibility("herdr 0.8.0", "test").is_ok());
+        assert!(require_herdr_compatibility("herdr 0.9.0", "test").is_err());
     }
 
     #[test]

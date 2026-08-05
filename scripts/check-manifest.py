@@ -123,8 +123,10 @@ def main() -> None:
             re.MULTILINE,
         ):
             fail(f"release workflow must enable {job}")
-    if "needs: [publish, homebrew-preflight]" not in release:
-        fail("Homebrew publication must require the tap credential preflight")
+    if "needs: [build, homebrew-test]" not in release:
+        fail("GitHub Release publication must require Homebrew package tests")
+    if "needs: [publish, homebrew-preflight, homebrew-test]" not in release:
+        fail("Homebrew publication must require release, access, and package tests")
 
     manual_homebrew = ROOT / ".github/workflows/homebrew.yml"
     if not manual_homebrew.is_file():

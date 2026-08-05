@@ -10,7 +10,7 @@ inside this repository; Herdr core changes require a separate upstream proposal.
 ## Development requirements
 
 - Rust stable with the declared Rust 1.82 MSRV available for compatibility;
-- OpenSSH, Python 3.11+, and Herdr 0.7.5+;
+- OpenSSH, Python 3.11+, and Herdr 0.8.0+;
 - `lsof`, `curl`, `tar`, and a SHA-256 utility;
 - `shellcheck` for script validation; and
 - `cargo-deny` for dependency policy checks.
@@ -24,13 +24,9 @@ make lint
 make ci
 ```
 
-`make ci` runs formatting, Clippy with warnings denied, every Rust test target,
-release builds, manifest and script checks, the formula renderer tests, and a
-native package/install/uninstall smoke test. Run the dependency policy separately:
-
-```bash
-make deps-check
-```
+`make ci` runs formatting, Clippy with warnings denied, dependency policy,
+every Rust test target, release builds, manifest and shell checks, the formula
+renderer tests, and a native package/install/uninstall smoke test.
 
 Before opening a pull request:
 
@@ -97,7 +93,6 @@ assertions.
 - [`docs/testing.md`](docs/testing.md) — development and integration testing;
 - [`docs/release.md`](docs/release.md) — release and Homebrew publication;
 - [`docs/research.md`](docs/research.md) — verified Herdr API boundaries;
-- [`docs/review.md`](docs/review.md) — production-readiness review;
 - [`docs/herdr-proposal.md`](docs/herdr-proposal.md) — upstream API proposal.
 
 Do not add non-loopback listeners, arbitrary SSH targets to the companion API,

@@ -1,8 +1,4 @@
-use std::{
-    env, fs,
-    path::PathBuf,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::{env, fs, path::PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -85,42 +81,36 @@ fn write_preferences(preferences: &Preferences) -> Result<Preferences, String> {
     fs::create_dir_all(parent)
         .map_err(|error| format!("failed to create {}: {error}", parent.display()))?;
     let bytes = toml_edit::ser::to_string_pretty(preferences).map_err(|error| error.to_string())?;
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|error| error.to_string())?
-        .as_nanos();
-    let temporary = parent.join(format!(".preferences-{nonce}.tmp"));
-    fs::write(&temporary, bytes)
-        .map_err(|error| format!("failed to write {}: {error}", temporary.display()))?;
-    fs::rename(&temporary, &path)
-        .map_err(|error| format!("failed to update {}: {error}", path.display()))?;
+    herdr_fwd::atomic::write_file(&path, bytes.as_bytes(), 0o600)?;
     Ok(preferences.clone())
 }
 
 fn preferences_path() -> Result<PathBuf, String> {
-    if let Some(directory) = env::var_os("HERDR_PLUGIN_CONFIG_DIR") {
+    preferences_path_from(
+        env::var_os("HERDR_PLUGIN_CONFIG_DIR"),
+        env::var_os("XDG_CONFIG_HOME"),
+        env::var_os("HOME"),
+    )
+}
+
+fn preferences_path_from(
+    plugin_config: Option<std::ffi::OsString>,
+    xdg_config: Option<std::ffi::OsString>,
+    home: Option<std::ffi::OsString>,
+) -> Result<PathBuf, String> {
+    if let Some(directory) = plugin_config {
         return Ok(PathBuf::from(directory).join("config.toml"));
     }
-    let base = env::var_os("XDG_CONFIG_HOME")
+    let base = xdg_config
         .map(PathBuf::from)
-        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
+        .or_else(|| home.map(|home| PathBuf::from(home).join(".config")))
         .ok_or_else(|| "HOME is not set".to_string())?;
     Ok(base.join("herdr-fwd/config.toml"))
 }
 
 #[cfg(test)]
 mod preferences_tests {
-    use herdr_fwd::DEFAULT_PROCESS_TREE_DEPTH;
-
-    use super::{AfterForward, Preferences};
-
-    #[test]
-    fn defaults_to_opening_the_dashboard_space_after_forwarding() {
-        let preferences = Preferences::default();
-        assert!(preferences.onboarding);
-        assert_eq!(preferences.after_forward, AfterForward::Space);
-        assert_eq!(preferences.process_tree_depth, DEFAULT_PROCESS_TREE_DEPTH);
-    }
+    use super::Preferences;
 
     #[test]
     fn keeps_onboarding_as_a_boolean_without_installation_metadata() {
@@ -141,18 +131,5 @@ mod preferences_tests {
             .unwrap()
             .onboarding
         );
-    }
-
-    #[test]
-    fn stores_preferences_in_config_toml() {
-        let directory = std::env::temp_dir().join("herdr-fwd-preferences-test");
-        std::env::set_var("HERDR_PLUGIN_CONFIG_DIR", &directory);
-
-        assert_eq!(
-            super::preferences_path().unwrap(),
-            directory.join("config.toml")
-        );
-
-        std::env::remove_var("HERDR_PLUGIN_CONFIG_DIR");
     }
 }

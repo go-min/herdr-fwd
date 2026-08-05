@@ -10,11 +10,10 @@ license, README, and version marker. `SHA256SUMS` covers every archive and the
 SPDX JSON software bill of materials. GitHub build-provenance attestations are
 published for the native archives.
 
-Every tag release verifies `HOMEBREW_TAP_TOKEN`, exercises the rendered formula
-on Linux and macOS, then proposes a formula update in `go-min/homebrew-tap`.
-The release itself remains independent: a missing or invalid tap credential
-fails before the formula proposal and does not alter the immutable release
-artifacts.
+Every tag release exercises the rendered formula on Linux and macOS before
+publishing artifacts. Tap credentials are verified independently before the
+formula proposal in `go-min/homebrew-tap`. A missing or invalid token blocks
+that proposal but does not alter or replace immutable release artifacts.
 
 ## Prepare
 
@@ -24,7 +23,7 @@ artifacts.
 
    ```bash
    make ci
-   make release-check VERSION_TAG=v0.1.0
+   make release-check VERSION_TAG=vX.Y.Z
    ```
 
 4. Complete the documented Lima scenario in `docs/testing.md`.
@@ -35,8 +34,8 @@ artifacts.
 Create and push an annotated tag from the verified `main` commit:
 
 ```bash
-git tag -a v0.1.0 -m "herdr-fwd v0.1.0"
-git push origin v0.1.0
+git tag -a vX.Y.Z -m "herdr-fwd vX.Y.Z"
+git push origin vX.Y.Z
 ```
 
 The tag-triggered workflow verifies version consistency, tests and builds all

@@ -4,6 +4,11 @@ use std::{
     fs::OpenOptions,
     path::{Path, PathBuf},
     process::{Command, Stdio},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    thread,
     time::{Duration, Instant},
 };
 
@@ -13,11 +18,15 @@ use herdr_fwd::{
 };
 use serde_json::Value;
 
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
 use crate::plugin::{
     dashboard_terminal::dashboard,
     herdr::{
         collect_array_values, collect_string_values, first_string_value, herdr_json, herdr_output,
-        loopback_listener_processes, process_label, process_started_at, process_tree_ids,
+        loopback_listener_processes, process_command_lines, process_label,
+        process_label_for_command, process_started_times, process_tree_ids,
         report_workspace_port_forward_status,
     },
     notifications::notify_changes,
@@ -26,13 +35,14 @@ use crate::plugin::{
     rpc::{api_request, list_forwards},
     session::{
         active_session_path, cleanup_orphan_dashboards, cleanup_remote_session,
-        dashboard_marker_path, is_session_file, read_json_file, session_directory, write_json_file,
-        DashboardMarker,
+        dashboard_marker_path, is_session_file, read_json_file, session_directory,
+        validate_current_herdr_session, write_json_file, DashboardMarker,
     },
     sidebar_config::enable_ports_row,
 };
 
 const RECONCILIATION_INTERVAL: Duration = Duration::from_secs(15);
+const RECONCILIATION_DEADLINE: Duration = Duration::from_secs(8);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(2);
 const FAILED_HEARTBEATS_BEFORE_CLEANUP: u8 = 3;
 
@@ -81,7 +91,7 @@ pub(crate) fn main() {
         Some("start") => start(),
         Some("watch") => spawn_watcher(),
         Some("watch-loop") => watch_loop(),
-        Some("scan") => scan_once(&mut HashMap::new(), false).map(|_| ()),
+        Some("scan") => scan_once().map(|_| ()),
         Some("dashboard") => env::args()
             .nth(2)
             .ok_or_else(|| "dashboard requires a session file".to_string())
@@ -109,14 +119,35 @@ fn start() -> Result<(), String> {
 }
 
 fn spawn_watcher() -> Result<(), String> {
-    Command::new(env::current_exe().map_err(|error| error.to_string())?)
+    let mut command = Command::new(env::current_exe().map_err(|error| error.to_string())?);
+    command
         .arg("watch-loop")
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stdout(Stdio::null());
+    command.stderr(watcher_stderr()?);
+    command
         .spawn()
         .map_err(|error| format!("failed to spawn watcher: {error}"))?;
     Ok(())
+}
+
+fn watcher_stderr() -> Result<Stdio, String> {
+    if env::var_os("HERDR_FWD_LOG").as_deref() != Some(std::ffi::OsStr::new("debug")) {
+        return Ok(Stdio::null());
+    }
+    let directory = crate::plugin::session::installation_state_directory()?;
+    fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+    #[cfg(unix)]
+    fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))
+        .map_err(|error| format!("failed to secure watcher log directory: {error}"))?;
+    let mut options = OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    options
+        .open(directory.join("watcher.log"))
+        .map(Stdio::from)
+        .map_err(|error| format!("failed to open watcher log: {error}"))
 }
 
 fn watch_loop() -> Result<(), String> {
@@ -143,7 +174,7 @@ fn watch_loop() -> Result<(), String> {
     // retry until the first one appears. Once it does, events drive expensive
     // pane reads while a light heartbeat keeps the companion lease alive.
     loop {
-        let sessions = scan_once(&mut failures, true)?;
+        let sessions = heartbeat_once(&mut failures, true)?;
         if sessions == 0 {
             // Allow startup hooks to run just before the wrapper uploads its
             // session file, but do not leave an orphan watcher running.
@@ -157,6 +188,8 @@ fn watch_loop() -> Result<(), String> {
         std::thread::sleep(HEARTBEAT_INTERVAL);
     }
 
+    let _heartbeat = HeartbeatWorker::start();
+    scan_once()?;
     let mut last_reconciliation = Instant::now();
     loop {
         #[cfg(unix)]
@@ -184,52 +217,76 @@ fn watch_loop() -> Result<(), String> {
             false
         };
 
-        if heartbeat_once(&mut failures, true)? == 0 {
+        if session_files(false)?.is_empty() {
             return Ok(());
         }
         if event_received || last_reconciliation.elapsed() >= RECONCILIATION_INTERVAL {
-            scan_once(&mut failures, true)?;
+            scan_once()?;
             last_reconciliation = Instant::now();
         }
     }
 }
 
-fn scan_once(failures: &mut HashMap<PathBuf, u8>, lifecycle: bool) -> Result<usize, String> {
-    let session_files = session_files()?;
+struct HeartbeatWorker {
+    stop: Arc<AtomicBool>,
+    thread: Option<thread::JoinHandle<()>>,
+}
 
-    for path in &session_files {
-        match process_session(path) {
-            Ok(()) => {
-                failures.remove(path);
-            }
-            Err(error) => {
-                let failure_count = failures.entry(path.clone()).or_default();
-                *failure_count = failure_count.saturating_add(1);
-                if lifecycle && *failure_count >= FAILED_HEARTBEATS_BEFORE_CLEANUP {
-                    cleanup_remote_session(path).map_err(|cleanup_error| {
-                        format!(
-                            "session {}: {error}; dashboard cleanup failed: {cleanup_error}",
-                            path.display()
-                        )
-                    })?;
-                    failures.remove(path);
-                } else if env::var_os("HERDR_FWD_LOG").as_deref()
-                    == Some(std::ffi::OsStr::new("debug"))
-                {
-                    eprintln!("session {}: {error}", path.display());
+impl HeartbeatWorker {
+    fn start() -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_stop = Arc::clone(&stop);
+        let thread = thread::spawn(move || {
+            let mut failures = HashMap::new();
+            while !worker_stop.load(Ordering::SeqCst) {
+                if let Err(error) = heartbeat_once(&mut failures, true) {
+                    debug_message(&format!("heartbeat: {error}"));
+                }
+                for _ in 0..20 {
+                    if worker_stop.load(Ordering::SeqCst) {
+                        return;
+                    }
+                    thread::sleep(Duration::from_millis(100));
                 }
             }
+        });
+        Self {
+            stop,
+            thread: Some(thread),
         }
     }
-    failures.retain(|path, _| session_files.contains(path));
+}
+
+impl Drop for HeartbeatWorker {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+fn scan_once() -> Result<usize, String> {
+    let session_files = session_files(true)?;
+
+    for path in &session_files {
+        if let Err(error) = process_session(path) {
+            debug_message(&format!("session {}: {error}", path.display()));
+        }
+    }
     Ok(session_files.len())
 }
 
+fn debug_message(message: &str) {
+    if env::var_os("HERDR_FWD_LOG").as_deref() == Some(std::ffi::OsStr::new("debug")) {
+        eprintln!("herdr-fwd-plugin: {message}");
+    }
+}
+
 fn heartbeat_once(failures: &mut HashMap<PathBuf, u8>, lifecycle: bool) -> Result<usize, String> {
-    let session_files = session_files()?;
+    let session_files = session_files(false)?;
     for path in &session_files {
-        let result = read_json_file::<RemoteSessionConfig>(path).and_then(|config| {
-            config.validate()?;
+        let result = read_scoped_session_config(path).and_then(|config| {
             api_request::<Value>(&config, "POST", "/v1/heartbeat", None).map(|_| ())
         });
         match result {
@@ -247,10 +304,8 @@ fn heartbeat_once(failures: &mut HashMap<PathBuf, u8>, lifecycle: bool) -> Resul
                         )
                     })?;
                     failures.remove(path);
-                } else if env::var_os("HERDR_FWD_LOG").as_deref()
-                    == Some(std::ffi::OsStr::new("debug"))
-                {
-                    eprintln!("session {}: {error}", path.display());
+                } else {
+                    debug_message(&format!("session {}: {error}", path.display()));
                 }
             }
         }
@@ -259,7 +314,7 @@ fn heartbeat_once(failures: &mut HashMap<PathBuf, u8>, lifecycle: bool) -> Resul
     Ok(session_files.len())
 }
 
-fn session_files() -> Result<Vec<PathBuf>, String> {
+fn session_files(cleanup_dashboards: bool) -> Result<Vec<PathBuf>, String> {
     let directory = session_directory()?;
     let entries = match fs::read_dir(&directory) {
         Ok(entries) => entries
@@ -274,20 +329,32 @@ fn session_files() -> Result<Vec<PathBuf>, String> {
         .filter(|path| is_session_file(path))
         .cloned()
         .collect::<Vec<_>>();
-    cleanup_orphan_dashboards(&entries, &session_files)?;
+    if cleanup_dashboards {
+        cleanup_orphan_dashboards(&entries, &session_files)?;
+    }
     Ok(session_files)
 }
 
 fn process_session(path: &Path) -> Result<(), String> {
-    let config: RemoteSessionConfig = read_json_file(path)?;
-    config.validate()?;
-    api_request::<Value>(&config, "POST", "/v1/heartbeat", None)?;
+    let config = read_scoped_session_config(path)?;
     if !config.auto_detect {
         return Ok(());
     }
+    process_session_discovery(path, &config)
+}
 
-    let previous = list_forwards(&config)?;
-    let process_tree_depth = load_preferences()?.process_tree_depth;
+fn read_scoped_session_config(path: &Path) -> Result<RemoteSessionConfig, String> {
+    let config: RemoteSessionConfig = read_json_file(path)?;
+    config.validate()?;
+    validate_current_herdr_session(&config)?;
+    Ok(config)
+}
+
+fn process_session_discovery(path: &Path, config: &RemoteSessionConfig) -> Result<(), String> {
+    let reconciliation_started = Instant::now();
+    let previous = list_forwards(config)?;
+    let preferences = load_preferences()?;
+    let process_tree_depth = preferences.process_tree_depth;
     let pane_list = herdr_json(&["pane", "list"])?;
     let pane_ids = collect_string_values(&pane_list, "pane_id");
     let pane_workspaces = pane_workspace_map(&pane_list);
@@ -298,6 +365,7 @@ fn process_session(path: &Path) -> Result<(), String> {
     let mut detected = Vec::new();
 
     for pane_id in pane_ids {
+        ensure_reconciliation_deadline(reconciliation_started)?;
         let process_info = herdr_json(&["pane", "process-info", "--pane", &pane_id])?;
         let processes = collect_array_values(&process_info, "foreground_processes");
         if processes.is_empty() {
@@ -317,12 +385,25 @@ fn process_session(path: &Path) -> Result<(), String> {
             process_ids.iter().copied().collect::<HashSet<_>>(),
         );
         let listeners = loopback_listener_processes(&process_ids)?;
+        ensure_reconciliation_deadline(reconciliation_started)?;
         let ports = listeners.keys().copied().collect::<Vec<_>>();
+        let listener_process_ids = listeners
+            .values()
+            .map(|(process_id, _)| *process_id)
+            .collect::<Vec<_>>();
+        let listener_commands = process_command_lines(&listener_process_ids).unwrap_or_default();
+        ensure_reconciliation_deadline(reconciliation_started)?;
+        let listener_start_times = process_started_times(&listener_process_ids).unwrap_or_default();
+        ensure_reconciliation_deadline(reconciliation_started)?;
         active_ports.insert(
             pane_id.clone(),
             ports.iter().copied().collect::<HashSet<_>>(),
         );
         for (port, (process_id, remote_host)) in listeners {
+            let listener_process = listener_commands
+                .get(&process_id)
+                .map(|command| process_label_for_command(command))
+                .unwrap_or_else(|| process.clone());
             let detected_url_host = if remote_host == "::1" {
                 "[::1]".to_string()
             } else {
@@ -333,54 +414,99 @@ fn process_session(path: &Path) -> Result<(), String> {
                 preferred_local_port: port,
                 remote_host,
                 pane_id: pane_id.clone(),
-                process: process.clone(),
+                process: listener_process,
                 detected_url: format!("http://{detected_url_host}:{port}/"),
                 automatic: true,
-                server_started_at: process_started_at(process_id),
+                server_started_at: listener_start_times.get(&process_id).copied(),
                 process_id: Some(process_id),
             });
         }
     }
 
-    for forward in &previous {
-        if !forward.automatic {
-            continue;
-        }
-        let process_changed = process_changed(forward, &active_processes, &active_process_ids);
-        if !active_panes.contains(&forward.pane_id)
-            || process_changed
-            || !active_ports
-                .get(&forward.pane_id)
-                .is_some_and(|ports| ports.contains(&forward.remote_port))
-        {
-            let _ = api_request::<Value>(
-                &config,
-                "DELETE",
-                &format!("/v1/forwards/{}", forward.id),
-                None,
-            );
-        }
-    }
-
+    let deletions = previous
+        .iter()
+        .filter(|forward| forward.automatic)
+        .filter(|forward| {
+            !active_panes.contains(&forward.pane_id)
+                || process_changed(forward, &active_processes, &active_process_ids)
+                || !active_ports
+                    .get(&forward.pane_id)
+                    .is_some_and(|ports| ports.contains(&forward.remote_port))
+        })
+        .map(|forward| forward.id.clone())
+        .collect::<Vec<_>>();
     let automatic = automatic_requests_to_create(detected, &previous);
-    let opened_forwards = !automatic.is_empty();
-    for request in automatic {
-        let _ = api_request::<Forward>(
-            &config,
-            "POST",
-            "/v1/forwards",
-            Some(serde_json::to_value(request).map_err(|error| error.to_string())?),
-        );
-    }
-    if opened_forwards {
-        show_after_forward(path, load_preferences()?.after_forward)?;
+    let outcome = reconcile_forward_requests(
+        &deletions,
+        &automatic,
+        |id| {
+            api_request::<Value>(config, "DELETE", &format!("/v1/forwards/{id}"), None).map(|_| ())
+        },
+        |request| {
+            api_request::<Forward>(
+                config,
+                "POST",
+                "/v1/forwards",
+                Some(serde_json::to_value(request).map_err(|error| error.to_string())?),
+            )
+            .map(|_| ())
+        },
+    );
+    if outcome.created > 0 {
+        show_after_forward(path, preferences.after_forward)?;
     }
 
-    let current = list_forwards(&config)?;
+    let current = list_forwards(config)?;
     report_workspace_forward_metadata(&previous, &current, &pane_workspaces);
     reconcile_dashboard(path, &current)?;
     notify_changes(&previous, &current);
-    Ok(())
+    if outcome.errors.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "forward reconciliation incomplete: {}",
+            outcome.errors.join("; ")
+        ))
+    }
+}
+
+fn ensure_reconciliation_deadline(started: Instant) -> Result<(), String> {
+    if started.elapsed() >= RECONCILIATION_DEADLINE {
+        Err("listener reconciliation exceeded its 8 second deadline".into())
+    } else {
+        Ok(())
+    }
+}
+
+struct ReconciliationOutcome {
+    created: usize,
+    errors: Vec<String>,
+}
+
+fn reconcile_forward_requests(
+    deletions: &[String],
+    creations: &[ForwardRequest],
+    mut delete: impl FnMut(&str) -> Result<(), String>,
+    mut create: impl FnMut(&ForwardRequest) -> Result<(), String>,
+) -> ReconciliationOutcome {
+    let mut outcome = ReconciliationOutcome {
+        created: 0,
+        errors: Vec::new(),
+    };
+    for id in deletions {
+        if let Err(error) = delete(id) {
+            outcome.errors.push(format!("delete {id}: {error}"));
+        }
+    }
+    for request in creations {
+        match create(request) {
+            Ok(()) => outcome.created += 1,
+            Err(error) => outcome
+                .errors
+                .push(format!("create {}: {error}", request.remote_port)),
+        }
+    }
+    outcome
 }
 
 fn automatic_requests_to_create(
@@ -411,14 +537,14 @@ fn process_changed(
     active_processes: &HashMap<String, String>,
     active_process_ids: &HashMap<String, HashSet<u32>>,
 ) -> bool {
+    if let Some(process_id) = forward.process_id {
+        return !active_process_ids
+            .get(&forward.pane_id)
+            .is_some_and(|process_ids| process_ids.contains(&process_id));
+    }
     active_processes
         .get(&forward.pane_id)
         .is_some_and(|process| process != &forward.process)
-        || forward.process_id.is_some_and(|process_id| {
-            !active_process_ids
-                .get(&forward.pane_id)
-                .is_some_and(|process_ids| process_ids.contains(&process_id))
-        })
 }
 
 fn collect_pane_workspaces(value: &Value, output: &mut HashMap<String, String>) {
@@ -690,9 +816,9 @@ mod lifecycle_tests {
 
     use super::{
         automatic_requests_to_create, close_dashboard_with, dashboard_command_with_config,
-        forward_sidebar_token, forwarding_space_status, open_dashboard_space_with,
-        pane_workspace_map, popup_pane_arguments, process_changed, workspace_create_arguments,
-        workspace_port_tokens, DashboardMarker, DashboardOperations,
+        open_dashboard_space_with, pane_workspace_map, popup_pane_arguments, process_changed,
+        reconcile_forward_requests, workspace_create_arguments, workspace_port_tokens,
+        DashboardMarker, DashboardOperations,
     };
 
     struct TestDirectory(PathBuf);
@@ -802,32 +928,6 @@ mod lifecycle_tests {
     }
 
     #[test]
-    fn reports_forwarding_space_live_and_paused_counts() {
-        let active = Forward {
-            id: "active".into(),
-            remote_port: 5173,
-            local_port: 5173,
-            remote_host: "127.0.0.1".into(),
-            pane_id: "w1:p1".into(),
-            process: "Vite".into(),
-            detected_url: "http://localhost:5173".into(),
-            automatic: true,
-            enabled: true,
-            server_started_at: None,
-            process_id: None,
-            tunnel_opened_at: 0,
-        };
-        let paused = Forward {
-            enabled: false,
-            ..active.clone()
-        };
-        assert_eq!(
-            forwarding_space_status(&[active, paused]),
-            "1 active · 1 paused"
-        );
-    }
-
-    #[test]
     fn detects_a_process_restart_by_pid_even_when_the_label_is_unchanged() {
         let forward = Forward {
             id: "vite".into(),
@@ -854,31 +954,29 @@ mod lifecycle_tests {
     }
 
     #[test]
-    fn shortens_same_port_forwards_in_the_sidebar() {
+    fn keeps_a_listener_forward_when_its_specific_label_differs_from_the_runtime() {
         let forward = Forward {
-            id: "vite".into(),
-            remote_port: 5173,
-            local_port: 5173,
+            id: "storybook".into(),
+            remote_port: 6006,
+            local_port: 6006,
             remote_host: "127.0.0.1".into(),
             pane_id: "w1:p1".into(),
-            process: "Vite".into(),
-            detected_url: "http://localhost:5173".into(),
+            process: "Storybook".into(),
+            detected_url: "http://localhost:6006".into(),
             automatic: true,
             enabled: true,
             server_started_at: None,
-            process_id: None,
+            process_id: Some(42),
             tunnel_opened_at: 0,
         };
-        assert_eq!(
-            forwarding_space_status(std::slice::from_ref(&forward)),
-            "1 active"
-        );
-        assert_eq!(forward_sidebar_token(&forward), "→5173");
-        let remapped = Forward {
-            local_port: 5174,
-            ..forward
-        };
-        assert_eq!(forward_sidebar_token(&remapped), "5173→5174");
+        let active_processes = HashMap::from([("w1:p1".into(), "Node".into())]);
+        let active_process_ids = HashMap::from([("w1:p1".into(), HashSet::from([42]))]);
+
+        assert!(!process_changed(
+            &forward,
+            &active_processes,
+            &active_process_ids
+        ));
     }
 
     #[test]
@@ -948,7 +1046,7 @@ mod lifecycle_tests {
     }
 
     #[test]
-    fn opens_popup_entrypoints_without_cli_only_placement_options() {
+    fn uses_context_safe_herdr_commands_for_dashboard_creation() {
         assert_eq!(
             popup_pane_arguments("dashboard-popup", std::path::Path::new("/tmp/session.json")),
             [
@@ -965,10 +1063,6 @@ mod lifecycle_tests {
             .map(str::to_owned)
             .to_vec()
         );
-    }
-
-    #[test]
-    fn creates_the_forwarding_space_without_changing_focus() {
         assert_eq!(
             workspace_create_arguments("Port Forwarding"),
             [
@@ -1039,57 +1133,83 @@ mod lifecycle_tests {
     }
 
     #[test]
-    fn closes_a_created_workspace_when_pane_launch_fails() {
-        let directory = TestDirectory::new();
-        let mut operations = TestDashboardOperations::failing(DashboardFailure::PaneRun);
-
-        let error = open_dashboard_space_with(
-            &mut operations,
-            &directory.path().join("session.dashboard.json"),
-            "0 active",
-            "dashboard command",
-        )
-        .expect_err("pane launch should fail");
-
-        assert_eq!(error, "pane launch failed");
-        assert_eq!(operations.calls, ["create", "pane run", "close"]);
-    }
-
-    #[test]
-    fn closes_a_created_workspace_when_status_reporting_fails() {
-        let directory = TestDirectory::new();
-        let mut operations = TestDashboardOperations::failing(DashboardFailure::Status);
-
-        let error = open_dashboard_space_with(
-            &mut operations,
-            &directory.path().join("session.dashboard.json"),
-            "0 active",
-            "dashboard command",
-        )
-        .expect_err("status reporting should fail");
-
-        assert_eq!(error, "status failed");
-        assert_eq!(operations.calls, ["create", "pane run", "status", "close"]);
-    }
-
-    #[test]
-    fn closes_a_created_workspace_when_marker_persistence_fails() {
-        let directory = TestDirectory::new();
-        let mut operations = TestDashboardOperations::failing(DashboardFailure::MarkerWrite);
-
-        let error = open_dashboard_space_with(
-            &mut operations,
-            &directory.path().join("session.dashboard.json"),
-            "0 active",
-            "dashboard command",
-        )
-        .expect_err("marker persistence should fail");
-
-        assert_eq!(error, "marker write failed");
-        assert_eq!(
-            operations.calls,
-            ["create", "pane run", "status", "marker write", "close"]
+    fn reports_reconciliation_errors_and_counts_only_successful_creates() {
+        let requests = vec![
+            ForwardRequest {
+                remote_port: 3000,
+                preferred_local_port: 3000,
+                remote_host: "127.0.0.1".into(),
+                pane_id: "w1:p1".into(),
+                process: "Next.js".into(),
+                detected_url: "http://localhost:3000/".into(),
+                automatic: true,
+                server_started_at: None,
+                process_id: Some(41),
+            },
+            ForwardRequest {
+                remote_port: 6006,
+                preferred_local_port: 6006,
+                remote_host: "127.0.0.1".into(),
+                pane_id: "w1:p2".into(),
+                process: "Storybook".into(),
+                detected_url: "http://localhost:6006/".into(),
+                automatic: true,
+                server_started_at: None,
+                process_id: Some(42),
+            },
+        ];
+        let outcome = reconcile_forward_requests(
+            &["stale".to_string()],
+            &requests,
+            |_| Err("delete unavailable".into()),
+            |request| {
+                (request.remote_port == 6006)
+                    .then_some(())
+                    .ok_or_else(|| "create unavailable".into())
+            },
         );
+
+        assert_eq!(outcome.created, 1);
+        assert_eq!(outcome.errors.len(), 2);
+        assert!(outcome.errors[0].contains("delete stale"));
+        assert!(outcome.errors[1].contains("create 3000"));
+    }
+
+    #[test]
+    fn closes_a_new_workspace_after_any_initialization_failure() {
+        let cases: &[(DashboardFailure, &str, &[&str])] = &[
+            (
+                DashboardFailure::PaneRun,
+                "pane launch failed",
+                &["create", "pane run", "close"],
+            ),
+            (
+                DashboardFailure::Status,
+                "status failed",
+                &["create", "pane run", "status", "close"],
+            ),
+            (
+                DashboardFailure::MarkerWrite,
+                "marker write failed",
+                &["create", "pane run", "status", "marker write", "close"],
+            ),
+        ];
+
+        for (failure, expected_error, expected_calls) in cases {
+            let directory = TestDirectory::new();
+            let mut operations = TestDashboardOperations::failing(*failure);
+
+            let error = open_dashboard_space_with(
+                &mut operations,
+                &directory.path().join("session.dashboard.json"),
+                "0 active",
+                "dashboard command",
+            )
+            .expect_err("dashboard initialization should fail");
+
+            assert_eq!(&error, expected_error);
+            assert_eq!(&operations.calls, expected_calls);
+        }
     }
 
     #[test]

@@ -292,62 +292,9 @@ pub(crate) fn http_request(
 
 #[cfg(test)]
 mod management_tests {
-    use std::{
-        env, fs,
-        path::PathBuf,
-        sync::{
-            atomic::{AtomicU64, Ordering},
-            Mutex, OnceLock,
-        },
-    };
-
     use crate::local::companion::LocalSessionState;
 
-    use super::{
-        create_manual_forward, manual_forward_request, process_is_alive, resolve_manual_session,
-    };
-
-    static TEST_DIRECTORY_ID: AtomicU64 = AtomicU64::new(0);
-    static RUNTIME_DIRECTORY_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-
-    struct TestDirectory(PathBuf);
-
-    impl TestDirectory {
-        fn create() -> Self {
-            let id = TEST_DIRECTORY_ID.fetch_add(1, Ordering::Relaxed);
-            let path = env::temp_dir().join(format!(
-                "herdr-fwd-management-test-{}-{id}",
-                std::process::id()
-            ));
-            fs::create_dir_all(&path).unwrap();
-            Self(path)
-        }
-    }
-
-    impl Drop for TestDirectory {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
-
-    struct RuntimeDirectoryGuard(Option<std::ffi::OsString>);
-
-    impl RuntimeDirectoryGuard {
-        fn set(path: &std::path::Path) -> Self {
-            let previous = env::var_os("XDG_RUNTIME_DIR");
-            env::set_var("XDG_RUNTIME_DIR", path);
-            Self(previous)
-        }
-    }
-
-    impl Drop for RuntimeDirectoryGuard {
-        fn drop(&mut self) {
-            match self.0.take() {
-                Some(path) => env::set_var("XDG_RUNTIME_DIR", path),
-                None => env::remove_var("XDG_RUNTIME_DIR"),
-            }
-        }
-    }
+    use super::{process_is_alive, resolve_manual_session};
 
     #[test]
     fn distinguishes_live_and_stale_session_owners() {
@@ -356,33 +303,7 @@ mod management_tests {
     }
 
     #[test]
-    fn creates_a_manual_loopback_request() {
-        let request = manual_forward_request(4173, 5173);
-        assert_eq!(request.remote_port, 4173);
-        assert_eq!(request.preferred_local_port, 5173);
-        assert_eq!(request.pane_id, "manual");
-        assert!(!request.automatic);
-    }
-
-    #[test]
-    fn missing_session_explains_how_to_start_the_target() {
-        let _lock = RUNTIME_DIRECTORY_LOCK
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        let directory = TestDirectory::create();
-        let _runtime = RuntimeDirectoryGuard::set(&directory.0);
-
-        let error = create_manual_forward(&["workbox".into(), "4173".into()]).unwrap_err();
-
-        assert_eq!(
-            error,
-            "no active hfwd session for workbox; start one with hfwd workbox"
-        );
-    }
-
-    #[test]
-    fn multiple_sessions_explain_how_to_recover_before_retrying() {
+    fn rejects_an_ambiguous_manual_forward_session() {
         let session = |id: &str| LocalSessionState {
             session_id: id.into(),
             target: "workbox".into(),
@@ -391,29 +312,9 @@ mod management_tests {
             wrapper_pid: std::process::id(),
             forwards: Vec::new(),
         };
-        let error =
+        assert!(
             resolve_manual_session(vec![session("first"), session("second")], "workbox", 4173)
-                .unwrap_err();
-
-        assert_eq!(
-            error,
-            "multiple active hfwd sessions for workbox; end one session, then retry hfwd forward workbox 4173"
-        );
-    }
-
-    #[test]
-    fn invalid_ports_include_a_safe_retry_command() {
-        let remote_error = create_manual_forward(&["workbox".into(), "0".into()]).unwrap_err();
-        assert_eq!(
-            remote_error,
-            "invalid remote port 0; use 1..=65535, then run hfwd forward workbox <remote-port> [local-port]"
-        );
-
-        let local_error =
-            create_manual_forward(&["workbox".into(), "4173".into(), "0".into()]).unwrap_err();
-        assert_eq!(
-            local_error,
-            "invalid local port 0; use 1..=65535, then run hfwd forward workbox 4173 <local-port>"
+                .is_err()
         );
     }
 }

@@ -21,6 +21,7 @@ pub(crate) fn api_request<T: for<'de> Deserialize<'de>>(
     path: &str,
     body: Option<Value>,
 ) -> Result<T, String> {
+    config.validate()?;
     let authority = config
         .rpc_url
         .strip_prefix("http://")

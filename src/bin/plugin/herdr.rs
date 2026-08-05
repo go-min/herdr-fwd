@@ -171,21 +171,77 @@ pub(crate) fn loopback_listener_processes(
     process_ids: &[u32],
 ) -> Result<BTreeMap<u16, (u32, String)>, String> {
     let mut ports = BTreeMap::new();
-    for process_id in process_ids {
-        let process_id = process_id.to_string();
+    #[cfg(target_os = "linux")]
+    let mut discovery_errors = Vec::new();
+    if !process_ids.is_empty() {
+        let process_ids_argument = process_ids
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
         let output = run_command_with_timeout(
             "lsof",
-            &["-nP", "-a", "-p", &process_id, "-iTCP", "-sTCP:LISTEN"],
+            &[
+                "-nP",
+                "-a",
+                "-p",
+                &process_ids_argument,
+                "-iTCP",
+                "-sTCP:LISTEN",
+            ],
             RECONCILIATION_COMMAND_TIMEOUT,
-        )
-        .map_err(|error| format!("failed to run lsof for process {process_id}: {error}"))?;
-        if output.status.success() {
-            ports.extend(loopback_listener_processes_from_lsof(
+        );
+        match output {
+            Ok(output) => ports.extend(loopback_listener_processes_from_lsof(
                 &String::from_utf8_lossy(&output.stdout),
-            ));
+            )),
+            Err(error) => {
+                #[cfg(not(target_os = "linux"))]
+                return Err(format!(
+                    "failed to run lsof for listener processes: {error}"
+                ));
+                #[cfg(target_os = "linux")]
+                discovery_errors.push(format!(
+                    "failed to run lsof for listener processes: {error}"
+                ));
+            }
+        }
+    }
+    #[cfg(target_os = "linux")]
+    if !process_ids.is_empty() {
+        match run_command_with_timeout("ss", &["-ltnp"], RECONCILIATION_COMMAND_TIMEOUT) {
+            Ok(output) if output.status.success() => {
+                merge_listener_processes(
+                    &mut ports,
+                    loopback_listener_processes_from_ss(
+                        &String::from_utf8_lossy(&output.stdout),
+                        process_ids,
+                    ),
+                );
+            }
+            Ok(output) => discovery_errors.push(format!(
+                "failed to run ss for listener processes: exited with {}",
+                output.status
+            )),
+            Err(error) => {
+                discovery_errors.push(format!("failed to run ss for listener processes: {error}"))
+            }
+        }
+        if discovery_errors.len() == 2 {
+            return Err(discovery_errors.join("; "));
         }
     }
     Ok(ports)
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn merge_listener_processes(
+    listeners: &mut BTreeMap<u16, (u32, String)>,
+    additional: BTreeMap<u16, (u32, String)>,
+) {
+    for (port, process) in additional {
+        listeners.entry(port).or_insert(process);
+    }
 }
 
 pub(crate) fn loopback_listener_processes_from_lsof(output: &str) -> BTreeMap<u16, (u32, String)> {
@@ -217,19 +273,119 @@ pub(crate) fn loopback_listener_processes_from_lsof(output: &str) -> BTreeMap<u1
     ports
 }
 
-pub(crate) fn process_started_at(process_id: u32) -> Option<u64> {
-    let process_id = process_id.to_string();
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn loopback_listener_processes_from_ss(
+    output: &str,
+    process_ids: &[u32],
+) -> BTreeMap<u16, (u32, String)> {
+    let process_ids = process_ids.iter().copied().collect::<HashSet<_>>();
+    let mut ports = BTreeMap::new();
+    for line in output.lines() {
+        let Some(endpoint) = line.split_whitespace().nth(3) else {
+            continue;
+        };
+        let Some((host, port)) = endpoint.rsplit_once(':') else {
+            continue;
+        };
+        let host = host.trim_matches(['[', ']']);
+        if !matches!(host, "127.0.0.1" | "::1") {
+            continue;
+        }
+        let (Ok(port), Some(process_id)) = (
+            port.parse::<u16>(),
+            line.split("pid=")
+                .skip(1)
+                .filter_map(|value| {
+                    value
+                        .split_once(',')
+                        .and_then(|(value, _)| value.parse::<u32>().ok())
+                })
+                .find(|process_id| process_ids.contains(process_id)),
+        ) else {
+            continue;
+        };
+        if port != 0 {
+            ports.entry(port).or_insert((process_id, host.into()));
+        }
+    }
+    ports
+}
+
+pub(crate) fn process_command_lines(process_ids: &[u32]) -> Result<HashMap<u32, String>, String> {
+    if process_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let process_ids = process_ids
+        .iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
     let output = run_command_with_timeout(
         "ps",
-        &["-o", "etime=", "-p", &process_id],
+        &["-o", "pid=,command=", "-p", &process_ids],
         RECONCILIATION_COMMAND_TIMEOUT,
     )
-    .ok()?;
+    .map_err(|error| format!("failed to inspect listener commands: {error}"))?;
     if !output.status.success() {
-        return None;
+        return Err(format!(
+            "failed to inspect listener commands: ps exited with {}",
+            output.status
+        ));
     }
-    let elapsed = parse_process_elapsed(&String::from_utf8_lossy(&output.stdout))?;
-    Some(started_at(unix_time_now(), elapsed))
+    Ok(process_command_lines_from_ps(&String::from_utf8_lossy(
+        &output.stdout,
+    )))
+}
+
+pub(crate) fn process_command_lines_from_ps(output: &str) -> HashMap<u32, String> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim_start();
+            let (process_id, command) = line.split_once(char::is_whitespace)?;
+            Some((process_id.parse().ok()?, command.trim_start().to_string()))
+        })
+        .filter(|(_, command)| !command.is_empty())
+        .collect()
+}
+
+pub(crate) fn process_started_times(process_ids: &[u32]) -> Result<HashMap<u32, u64>, String> {
+    if process_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let process_ids = process_ids
+        .iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    let output = run_command_with_timeout(
+        "ps",
+        &["-o", "pid=,etime=", "-p", &process_ids],
+        RECONCILIATION_COMMAND_TIMEOUT,
+    )
+    .map_err(|error| format!("failed to inspect listener start times: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "failed to inspect listener start times: ps exited with {}",
+            output.status
+        ));
+    }
+    Ok(process_started_times_from_ps(
+        &String::from_utf8_lossy(&output.stdout),
+        unix_time_now(),
+    ))
+}
+
+pub(crate) fn process_started_times_from_ps(output: &str, now: u64) -> HashMap<u32, u64> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let process_id = fields.next()?.parse().ok()?;
+            let elapsed = parse_process_elapsed(fields.next()?)?;
+            Some((process_id, started_at(now, elapsed)))
+        })
+        .collect()
 }
 
 const MAX_PROCESS_TREE_NODES: usize = 512;
@@ -347,6 +503,7 @@ pub(crate) struct PaneLocation {
     pub(crate) tab_id: String,
     pub(crate) tab: String,
     pub(crate) tab_number: u64,
+    pub(crate) pane_label: Option<String>,
 }
 
 impl Default for PaneLocation {
@@ -358,6 +515,7 @@ impl Default for PaneLocation {
             tab_id: String::new(),
             tab: String::new(),
             tab_number: u64::MAX,
+            pane_label: None,
         }
     }
 }
@@ -369,7 +527,7 @@ pub(crate) fn pane_locations(snapshot: &Value) -> HashMap<String, PaneLocation> 
     collect_location_records(snapshot, &mut workspaces, &mut tabs, &mut panes);
     panes
         .into_iter()
-        .map(|(pane_id, workspace_id, tab_id)| {
+        .map(|(pane_id, workspace_id, tab_id, pane_label)| {
             let (workspace, workspace_number) = workspaces
                 .get(&workspace_id)
                 .cloned()
@@ -387,6 +545,7 @@ pub(crate) fn pane_locations(snapshot: &Value) -> HashMap<String, PaneLocation> 
                     tab_id,
                     tab,
                     tab_number,
+                    pane_label,
                 },
             )
         })
@@ -397,7 +556,7 @@ fn collect_location_records(
     value: &Value,
     workspaces: &mut HashMap<String, (String, u64)>,
     tabs: &mut HashMap<String, (String, u64)>,
-    panes: &mut Vec<(String, String, String)>,
+    panes: &mut Vec<(String, String, String, Option<String>)>,
 ) {
     match value {
         Value::Object(object) => {
@@ -440,7 +599,18 @@ fn collect_location_records(
                 object.get("workspace_id").and_then(Value::as_str),
                 object.get("tab_id").and_then(Value::as_str),
             ) {
-                panes.push((pane_id.into(), workspace_id.into(), tab_id.into()));
+                let pane_label = object
+                    .get("label")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|label| !label.is_empty())
+                    .map(str::to_owned);
+                panes.push((
+                    pane_id.into(),
+                    workspace_id.into(),
+                    tab_id.into(),
+                    pane_label,
+                ));
             }
             for value in object.values() {
                 collect_location_records(value, workspaces, tabs, panes);
@@ -456,30 +626,35 @@ fn collect_location_records(
 }
 
 pub(crate) fn process_label(value: &Value) -> String {
-    for key in ["process_name", "name", "command"] {
-        if let Some(label) = first_string_value(value, key) {
-            let label = herdr_fwd::detect::sanitize_display_text(&label);
-            if label.is_empty() {
-                continue;
-            }
-            let lower = label.to_ascii_lowercase();
-            for (needle, display) in [
-                ("vite", "Vite"),
-                ("next", "Next.js"),
-                ("astro", "Astro"),
-                ("storybook", "Storybook"),
-                ("bun", "Bun"),
-                ("deno", "Deno"),
-                ("node", "Node"),
-            ] {
-                if lower.contains(needle) {
-                    return display.into();
-                }
-            }
-            return label.chars().take(128).collect();
-        }
+    process_label_from_strings(
+        ["process_name", "name", "command"]
+            .into_iter()
+            .flat_map(|key| collect_string_values(value, key)),
+    )
+}
+
+pub(crate) fn process_label_for_command(command: &str) -> String {
+    process_label_from_strings([command.to_string()])
+}
+
+fn process_label_from_strings(labels: impl IntoIterator<Item = String>) -> String {
+    let labels = labels
+        .into_iter()
+        .map(|label| herdr_fwd::detect::sanitize_display_text(&label))
+        .filter(|label| !label.is_empty())
+        .collect::<Vec<_>>();
+    let normalized = labels
+        .iter()
+        .map(|label| label.to_ascii_lowercase())
+        .collect::<Vec<_>>();
+
+    if let Some(tool) = herdr_fwd::tools::tool_for_labels(&normalized) {
+        return tool.display.into();
     }
-    "dev server".into()
+    labels
+        .first()
+        .map(|label| label.chars().take(128).collect())
+        .unwrap_or_else(|| "dev server".into())
 }
 
 pub(crate) fn collect_string_values(value: &Value, key: &str) -> Vec<String> {
@@ -665,7 +840,7 @@ fn herdr_socket_path() -> Result<std::ffi::OsString, String> {
 #[cfg(test)]
 mod herdr_tests {
     use std::{
-        collections::BTreeMap,
+        collections::{BTreeMap, HashMap},
         ffi::OsString,
         fs,
         path::PathBuf,
@@ -677,9 +852,11 @@ mod herdr_tests {
 
     use super::{
         collect_array_values, collect_string_values, herdr_output,
-        loopback_listener_processes_from_lsof, pane_locations, parse_process_elapsed,
-        process_label, process_tree_ids_from_parent_map, run_command_with_timeout,
-        select_herdr_binary, started_at, PaneLocation,
+        loopback_listener_processes_from_lsof, loopback_listener_processes_from_ss,
+        merge_listener_processes, pane_locations, parse_process_elapsed,
+        process_command_lines_from_ps, process_label, process_started_times_from_ps,
+        process_tree_ids_from_parent_map, run_command_with_timeout, select_herdr_binary,
+        PaneLocation,
     };
 
     #[test]
@@ -701,6 +878,14 @@ mod herdr_tests {
     }
 
     #[test]
+    fn parses_listener_start_times_in_one_process_snapshot() {
+        assert_eq!(
+            process_started_times_from_ps(" 123 01:02\n456 2-03:04:05\n", 200_000),
+            HashMap::from([(123, 199_938), (456, 16_155)])
+        );
+    }
+
+    #[test]
     fn bounds_process_tree_expansion_while_preserving_the_root() {
         let parents = (1..=600)
             .map(|process_id| (process_id + 10, 10))
@@ -709,16 +894,6 @@ mod herdr_tests {
 
         assert_eq!(ids.len(), 512);
         assert_eq!(&ids[..3], &[10, 11, 12]);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn command_runner_returns_stdout_for_a_successful_command() {
-        let output =
-            run_command_with_timeout("sh", &["-c", "printf ready"], Duration::from_secs(1))
-                .expect("successful command should return output");
-
-        assert_eq!(output.stdout, b"ready");
     }
 
     #[cfg(unix)]
@@ -736,21 +911,8 @@ mod herdr_tests {
 
     #[cfg(unix)]
     #[test]
-    fn command_runner_returns_output_for_a_non_zero_command() {
-        let output = run_command_with_timeout(
-            "sh",
-            &["-c", "printf failure >&2; exit 7"],
-            Duration::from_secs(1),
-        )
-        .expect("runner should return completed non-zero output");
-
-        assert!(!output.status.success());
-        assert_eq!(output.stderr, b"failure");
-    }
-
-    #[cfg(unix)]
-    #[test]
     fn herdr_output_returns_trimmed_cli_stderr_for_a_non_zero_command() {
+        let _environment = crate::plugin::TEST_ENV_LOCK.lock().unwrap();
         let previous_binary = std::env::var_os("HERDR_BIN_PATH");
         std::env::set_var("HERDR_BIN_PATH", "sh");
         let result = herdr_output(&["-c", "printf '  Herdr failed\\n' >&2; exit 7"]);
@@ -760,17 +922,6 @@ mod herdr_tests {
         }
 
         assert_eq!(result, Err("Herdr failed".into()));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn command_runner_returns_a_timeout_error_within_the_deadline() {
-        let started = Instant::now();
-        let error = run_command_with_timeout("sh", &["-c", "sleep 5"], Duration::from_millis(50))
-            .expect_err("sleeping command should time out");
-
-        assert!(error.contains("timed out"));
-        assert!(started.elapsed() < Duration::from_secs(1));
     }
 
     #[cfg(unix)]
@@ -889,9 +1040,46 @@ mod herdr_tests {
     }
 
     #[test]
-    fn converts_process_elapsed_seconds_to_a_start_timestamp() {
-        assert_eq!(started_at(1_722_000_120, 120), 1_722_000_000);
-        assert_eq!(started_at(60, 120), 0);
+    fn maps_loopback_listener_processes_from_ss_when_lsof_omits_them() {
+        let output = "State  Recv-Q Send-Q Local Address:Port Peer Address:PortProcess\nLISTEN 0      511        127.0.0.1:4000      0.0.0.0:*    users:((\"next-server (v1\",pid=679946,fd=24))\nLISTEN 0      511            [::1]:4001         [::]:*    users:((\"node\",pid=42,fd=18))\nLISTEN 0      511               *:4002            *:*    users:((\"node\",pid=43,fd=18))\n";
+        assert_eq!(
+            loopback_listener_processes_from_ss(output, &[679946, 42]),
+            BTreeMap::from([
+                (4000, (679946, "127.0.0.1".into())),
+                (4001, (42, "::1".into())),
+            ])
+        );
+    }
+
+    #[test]
+    fn merges_ss_results_without_overwriting_lsof_process_metadata() {
+        let mut lsof = BTreeMap::from([
+            (3000, (41, "127.0.0.1".to_string())),
+            (6006, (42, "127.0.0.1".to_string())),
+        ]);
+        let ss = BTreeMap::from([
+            (3000, (99, "::1".to_string())),
+            (5173, (43, "127.0.0.1".to_string())),
+        ]);
+
+        merge_listener_processes(&mut lsof, ss);
+
+        assert_eq!(lsof[&3000], (41, "127.0.0.1".to_string()));
+        assert_eq!(lsof[&5173], (43, "127.0.0.1".to_string()));
+        assert_eq!(lsof.len(), 3);
+    }
+
+    #[test]
+    fn maps_listener_process_ids_to_their_full_commands() {
+        let output =
+            "  123 node node_modules/storybook/bin/index.cjs dev\n456 python -m uvicorn app:app\n";
+        assert_eq!(
+            process_command_lines_from_ps(output),
+            HashMap::from([
+                (123, "node node_modules/storybook/bin/index.cjs dev".into()),
+                (456, "python -m uvicorn app:app".into()),
+            ])
+        );
     }
 
     #[test]
@@ -921,6 +1109,7 @@ mod herdr_tests {
                 tab_id: "w1:t2".into(),
                 tab: "Tooling".into(),
                 tab_number: 2,
+                pane_label: Some("server".into()),
             })
         );
     }

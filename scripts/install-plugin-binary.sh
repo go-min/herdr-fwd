@@ -6,7 +6,7 @@ repository=${HERDR_FWD_REPOSITORY_URL:-https://github.com/go-min/herdr-fwd}
 
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 
-reset_onboarding() {
+preserve_onboarding() {
   if [ -n "${HERDR_PLUGIN_CONFIG_DIR:-}" ]; then
     config_dir=$HERDR_PLUGIN_CONFIG_DIR
   else
@@ -17,14 +17,17 @@ reset_onboarding() {
   mkdir -p "$config_dir"
   temporary_config=$(mktemp "$config_dir/.config.toml.XXXXXX")
   {
-    if [ "${HERDR_FWD_INSTALLED_BY_WRAPPER:-}" = 1 ]; then
-      printf 'onboarding = true\n'
-    else
-      printf 'onboarding = true\n'
-    fi
     if [ -f "$config_path" ]; then
+      onboarding=$(sed 's/[[:space:]]*#.*$//' "$config_path" | sed -n 's/^[[:space:]]*onboarding[[:space:]]*=[[:space:]]*\([^[:space:]]*\)[[:space:]]*$/\1/p' | sed -n '1p')
+      case "$onboarding" in
+        true|false) ;;
+        *) onboarding=true ;;
+      esac
+      printf 'onboarding = %s\n' "$onboarding"
       sed -e '/^[[:space:]]*onboarding[[:space:]]*=.*/d' \
           -e '/^[[:space:]]*installation_source[[:space:]]*=.*/d' "$config_path"
+    else
+      printf 'onboarding = true\n'
     fi
   } > "$temporary_config"
   mv "$temporary_config" "$config_path"
@@ -83,7 +86,7 @@ tar -xzf "$temporary/$asset" -C "$temporary" ./herdr-fwd-plugin
 mkdir -p "$root/target/release"
 install -m 755 "$temporary/herdr-fwd-plugin" \
   "$root/target/release/herdr-fwd-plugin"
-reset_onboarding
+preserve_onboarding
 if [ "${HERDR_FWD_MANAGED_REMOTE_INSTALL:-}" != 1 ]; then
   clear_remote_origin
 fi

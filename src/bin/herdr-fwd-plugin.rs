@@ -1,4 +1,7 @@
 mod plugin {
+    #[cfg(test)]
+    pub(crate) static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     pub(crate) mod dashboard_actions;
     pub(crate) mod dashboard_render;
     pub(crate) mod dashboard_terminal;
