@@ -131,6 +131,8 @@ jobs:
             herdr-fwd/scripts/render-homebrew-formula.sh \
               "$RELEASE_TAG" "$RUNNER_TEMP/SHA256SUMS" \
               "$tap/Formula/herdr-fwd.rb"
+          ruby -e 'path, version = ARGV; formula = File.read(path); File.write(path, formula.sub("\n", "\n  version #{version.dump}\n"))' \
+            "$tap/Formula/herdr-fwd.rb" "${RELEASE_TAG#v}"
           brew style go-min/herdr-fwd-test/herdr-fwd
           brew install go-min/herdr-fwd-test/herdr-fwd
           brew test go-min/herdr-fwd-test/herdr-fwd
