@@ -1,6 +1,7 @@
 mod local {
     pub(crate) mod cli;
     pub(crate) mod companion;
+    pub(crate) mod http;
     pub(crate) mod management;
     pub(crate) mod release;
     pub(crate) mod remote_management;

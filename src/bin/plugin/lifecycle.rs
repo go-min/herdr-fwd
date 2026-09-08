@@ -44,7 +44,8 @@ use crate::plugin::{
 const RECONCILIATION_INTERVAL: Duration = Duration::from_secs(15);
 const RECONCILIATION_DEADLINE: Duration = Duration::from_secs(8);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(2);
-const FAILED_HEARTBEATS_BEFORE_CLEANUP: u8 = 3;
+// Cover the local 10-second lease, 30-second recovery, and bounded SSH commands.
+const REMOTE_SESSION_GRACE: Duration = Duration::from_secs(60);
 
 trait DashboardOperations {
     fn create_dashboard(&mut self, label: &str) -> Result<DashboardMarker, String>;
@@ -226,7 +227,7 @@ fn watch_loop() -> Result<(), String> {
             false
         };
 
-        if session_files(false)?.is_empty() {
+        if session_files(true)?.is_empty() {
             return Ok(());
         }
         let mut foreground_changed = false;
@@ -323,8 +324,11 @@ fn debug_message(message: &str) {
     }
 }
 
-fn heartbeat_once(failures: &mut HashMap<PathBuf, u8>, lifecycle: bool) -> Result<usize, String> {
-    let session_files = session_files(false)?;
+fn heartbeat_once(
+    failures: &mut HashMap<PathBuf, Instant>,
+    lifecycle: bool,
+) -> Result<usize, String> {
+    let session_files = session_files(lifecycle)?;
     for path in &session_files {
         let result = read_scoped_session_config(path).and_then(|config| {
             api_request::<Value>(&config, "POST", "/v1/heartbeat", None).map(|_| ())
@@ -334,9 +338,8 @@ fn heartbeat_once(failures: &mut HashMap<PathBuf, u8>, lifecycle: bool) -> Resul
                 failures.remove(path);
             }
             Err(error) => {
-                let failure_count = failures.entry(path.clone()).or_default();
-                *failure_count = failure_count.saturating_add(1);
-                if lifecycle && *failure_count >= FAILED_HEARTBEATS_BEFORE_CLEANUP {
+                let failed_since = failures.entry(path.clone()).or_insert_with(Instant::now);
+                if lifecycle && failed_since.elapsed() >= REMOTE_SESSION_GRACE {
                     cleanup_remote_session(path).map_err(|cleanup_error| {
                         format!(
                             "session {}: {error}; dashboard cleanup failed: {cleanup_error}",

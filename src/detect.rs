@@ -48,7 +48,13 @@ pub fn strip_ansi(input: &str) -> String {
                     index += 1;
                 }
             }
-            _ => index += 1,
+            _ => {
+                index += input[index..]
+                    .chars()
+                    .next()
+                    .expect("valid UTF-8 boundary")
+                    .len_utf8()
+            }
         }
     }
     out
@@ -129,4 +135,20 @@ mod tests {
             "Node"
         );
     }
+}
+
+#[test]
+fn sanitizer_handles_unknown_unicode_escape_sequences() {
+    for input in [
+        "\x1bїserver",
+        "\x1b🦀server",
+        "\x1b",
+        "\x1b[",
+        "\x1b]ї",
+        "звичайний текст",
+    ] {
+        let output = sanitize_display_text(input);
+        assert!(!output.chars().any(char::is_control));
+    }
+    assert_eq!(sanitize_display_text("\x1bїserver"), "server");
 }

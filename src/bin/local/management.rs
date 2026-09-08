@@ -109,26 +109,35 @@ pub(crate) fn close_forward(id_or_port: Option<&String>) -> Result<(), String> {
     let Some(id_or_port) = id_or_port else {
         return Err("usage: hfwd close <id-or-local-port>".into());
     };
-    let mut matched = false;
-    for (_, session) in session_states()? {
-        for forward in &session.forwards {
-            if &forward.id == id_or_port || forward.local_port.to_string() == *id_or_port {
-                matched = true;
-                http_request(
-                    &session.companion_url,
-                    &session.token,
-                    "DELETE",
-                    &format!("/v1/forwards/{}", forward.id),
-                    None,
-                )?;
-            }
-        }
+    let sessions = session_states()?;
+    let (session, forward) = resolve_close_forward(&sessions, id_or_port)?;
+    http_request(
+        &session.companion_url,
+        &session.token,
+        "DELETE",
+        &format!("/v1/forwards/{}", forward.id),
+        None,
+    )?;
+    Ok(())
+}
+
+fn resolve_close_forward<'a>(
+    sessions: &'a [(PathBuf, LocalSessionState)],
+    selector: &str,
+) -> Result<(&'a LocalSessionState, &'a Forward), String> {
+    let mut matches = sessions.iter().flat_map(|(_, session)| {
+        session.forwards.iter().filter_map(move |forward| {
+            (forward.id == selector || forward.local_port.to_string() == selector)
+                .then_some((session, forward))
+        })
+    });
+    let selected = matches
+        .next()
+        .ok_or_else(|| format!("forward not found: {selector}"))?;
+    if matches.next().is_some() {
+        return Err(format!("ambiguous forward {selector}; use a unique local port or the intended session's dashboard"));
     }
-    if matched {
-        Ok(())
-    } else {
-        Err(format!("forward not found: {id_or_port}"))
-    }
+    Ok(selected)
 }
 
 pub(crate) fn close_all_forwards() -> Result<(), String> {
@@ -317,4 +326,45 @@ mod management_tests {
                 .is_err()
         );
     }
+}
+
+#[test]
+fn close_selector_requires_exactly_one_mapping_across_sessions() {
+    let make = |id: &str, port| {
+        let forward: Forward = serde_json::from_value(serde_json::json!({
+            "id":"fwd-1", "remotePort":5173, "localPort":port, "remoteHost":"127.0.0.1",
+            "paneId":"manual", "process":"Manual", "detectedUrl":"http://localhost:5173/"
+        }))
+        .unwrap();
+        (
+            PathBuf::new(),
+            LocalSessionState {
+                session_id: id.into(),
+                target: id.into(),
+                companion_url: String::new(),
+                token: String::new(),
+                wrapper_pid: 0,
+                forwards: vec![forward],
+            },
+        )
+    };
+    let sessions = vec![make("first", 5173), make("second", 5174)];
+    assert!(resolve_close_forward(&sessions, "fwd-1").is_err());
+    assert_eq!(
+        resolve_close_forward(&sessions, "5174")
+            .unwrap()
+            .0
+            .session_id,
+        "second"
+    );
+    assert!(resolve_close_forward(&sessions, "missing").is_err());
+    assert_eq!(
+        resolve_close_forward(&sessions[..1], "fwd-1")
+            .unwrap()
+            .0
+            .session_id,
+        "first"
+    );
+    let paused = vec![make("first", 5173), make("second", 5173)];
+    assert!(resolve_close_forward(&paused, "5173").is_err());
 }

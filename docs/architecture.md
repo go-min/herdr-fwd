@@ -79,9 +79,10 @@ Process changes trigger settling scans; a 15-second reconciliation fallback
 covers listeners that start later without changing process identity. It
 associates each batched `lsof` listener with its foreground process, merging
 Linux `ss` results when available. One process may therefore produce multiple forwards. An
-independent worker sends a two-second heartbeat; only repeated heartbeat
-failures remove a stale session, so slow discovery cannot expire a healthy
-attach. Ten seconds without a heartbeat trigger transport recovery. If recovery
+independent worker sends a two-second heartbeat. A stale remote session and its
+dashboard are retained for 60 seconds of heartbeat failure, covering the local
+recovery budget. Explicit session-file removal still cleans up its dashboard
+promptly. Ten seconds without a heartbeat trigger transport recovery. If recovery
 fails within its retry budget, the wrapper terminates the attach, retries
 forward cleanup, closes its owned SSH master, and removes local runtime state. The SSH master remains an owned child
 process rather than a daemonized `ssh -f`; the wrapper handles SIGINT, SIGTERM,
@@ -149,3 +150,18 @@ the next available port. Partial replay cancels newly opened tunnels, and the
 attempt's master is terminated before retry. Registry state is published only
 once the entire replay succeeds. Retries stop after a 30-second budget, with
 bounded SSH operations and cancellation checks between steps.
+
+## Companion requests and shared preferences
+
+The companion accepts one Content-Length framed HTTP request per connection,
+with a 16 KiB header limit, 64 KiB body limit, and five-second request deadline.
+Incomplete requests are interrupted during shutdown. Duplicate framing or
+Authorization headers and transfer encoding are rejected. Connections are
+counted before reading headers, with at most 64 active requests.
+
+Manual rules and automatic pause preferences use a stable file lock shared by
+companions for the same remote host and Herdr session. Each transaction merges
+only its changed rules into the latest saved preferences; unrelated discovery
+cannot overwrite another connector's rules. Pauses survive process exit and
+rediscovery until explicitly resumed. Failed persistence restores the previous
+preferences while the same lock remains held.

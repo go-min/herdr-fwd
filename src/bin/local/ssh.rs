@@ -30,7 +30,7 @@ impl SshClient {
         timeout: Duration,
         operation: &str,
     ) -> Result<String, String> {
-        let child = Command::new("ssh")
+        let child = isolated_command("ssh")
             .args(arguments)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -168,7 +168,7 @@ impl SshClient {
         input: &[u8],
         timeout: Duration,
     ) -> Result<String, String> {
-        let mut child = Command::new("ssh")
+        let mut child = isolated_command("ssh")
             .args([
                 "-S",
                 &self.control_path.display().to_string(),
@@ -214,6 +214,26 @@ impl SshClient {
     }
 }
 
+fn isolated_command(program: &str) -> Command {
+    let mut command = Command::new(program);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    command
+}
+
+fn kill_process_group(child: &mut Child) {
+    #[cfg(unix)]
+    unsafe {
+        // Every child created here owns a private process group, including
+        // ProxyCommand descendants that can otherwise hold captured pipes open.
+        let _ = libc::killpg(child.id() as libc::pid_t, libc::SIGKILL);
+    }
+    let _ = child.kill();
+}
+
 fn wait_with_output_timeout(
     mut child: Child,
     timeout: Duration,
@@ -233,13 +253,14 @@ fn wait_with_output_timeout(
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
+                kill_process_group(&mut child);
                 return collect_output(status, stdout, stderr);
             }
             Ok(None) if started.elapsed() < timeout => {
                 thread::sleep(Duration::from_millis(25));
             }
             Ok(None) => {
-                let _ = child.kill();
+                kill_process_group(&mut child);
                 let _ = child.wait();
                 let _ = stdout.join();
                 let _ = stderr.join();
@@ -249,7 +270,7 @@ fn wait_with_output_timeout(
                 ));
             }
             Err(error) => {
-                let _ = child.kill();
+                kill_process_group(&mut child);
                 let _ = child.wait();
                 let _ = stdout.join();
                 let _ = stderr.join();
@@ -459,4 +480,35 @@ mod ssh_tests {
         );
         assert!(!session.with_extension("json.tmp").exists());
     }
+}
+
+#[test]
+fn ssh_timeout_reaps_descendants_holding_pipes() {
+    let child = isolated_command("sh")
+        .args(["-c", "sleep 10 & wait"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let started = Instant::now();
+    assert!(wait_with_output_timeout(child, Duration::from_millis(100), "test").is_err());
+    assert!(started.elapsed() < Duration::from_secs(2));
+}
+
+#[test]
+fn completed_ssh_leader_does_not_leave_pipe_readers_waiting() {
+    let child = isolated_command("sh")
+        .args(["-c", "sleep 10 & exit 0"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let started = Instant::now();
+    assert!(
+        wait_with_output_timeout(child, Duration::from_secs(1), "test")
+            .unwrap()
+            .status
+            .success()
+    );
+    assert!(started.elapsed() < Duration::from_secs(2));
 }

@@ -11,11 +11,11 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::local::http::Server;
 use herdr_fwd::{
     herdr_session_storage_key, registry::Registry, shell::quote as shell_quote,
     RemoteSessionConfig, PROTOCOL_VERSION,
 };
-use tiny_http::Server;
 
 use crate::local::{
     companion::{
@@ -105,7 +105,7 @@ fn run() -> Result<(), String> {
         .local_addr()
         .map_err(|error| format!("failed to inspect companion address: {error}"))?
         .port();
-    let server = Server::from_listener(listener, None)
+    let server = Server::from_listener(listener)
         .map_err(|error| format!("failed to start companion HTTP server: {error}"))?;
     let remote_rpc_port = establish_reverse_rpc(&client, companion_port)?;
     let token = secure_random_hex(32)?;

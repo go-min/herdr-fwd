@@ -1,7 +1,6 @@
 use std::{
     collections::HashSet,
     env,
-    io::Read,
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -11,20 +10,19 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::local::http::{Method, Request, Server};
 use herdr_fwd::{
     constant_time_eq,
     registry::{Forward, Registry, Ssh},
     ForwardRequest, RemoteSessionConfig, PROTOCOL_VERSION,
 };
 use serde::{Deserialize, Serialize};
-use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 
 use crate::local::{
     ssh::{remote_session_install_command, SshClient},
     support::{debug_log, open_browser, secure_random_bytes, write_private_json},
 };
 
-const MAX_BODY_SIZE: u64 = 64 * 1024;
 const MAX_ACTIVE_REQUESTS: usize = 64;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -39,7 +37,7 @@ pub(crate) struct LocalSessionState {
     pub(crate) forwards: Vec<Forward>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ManualForward {
     pub(crate) remote_port: u16,
@@ -116,21 +114,6 @@ impl<S: Ssh> CompanionState<S> {
         )
     }
 
-    fn persist_manual_locked(&self, registry: &Registry<S>) -> Result<(), String> {
-        let forwards = registry
-            .forwards
-            .values()
-            .filter(|forward| !forward.automatic)
-            .map(|forward| ManualForward {
-                remote_port: forward.remote_port,
-                local_port: forward.local_port,
-                remote_host: forward.remote_host.clone(),
-                enabled: forward.enabled,
-            })
-            .collect::<Vec<_>>();
-        write_private_json(&self.manual_path, &forwards)
-    }
-
     pub(crate) fn restore_manual(&self) -> Result<(), String> {
         let bytes = match std::fs::read(&self.manual_path) {
             Ok(bytes) => bytes,
@@ -169,34 +152,42 @@ impl<S: Ssh> CompanionState<S> {
         Ok(())
     }
 
-    #[cfg(test)]
-    fn persist_paused_automatic(&self) -> Result<(), String> {
-        let registry = self
-            .registry
-            .lock()
-            .map_err(|_| "forward registry lock poisoned".to_string())?;
-        self.persist_paused_automatic_locked(&registry)
-    }
-
-    fn persist_paused_automatic_locked(&self, registry: &Registry<S>) -> Result<(), String> {
-        let forwards = registry
-            .forwards
-            .values()
-            .filter(|forward| forward.automatic && !forward.enabled)
-            .map(|forward| PausedAutomaticForward {
-                remote_port: forward.remote_port,
-            })
+    fn persist_preferences_delta(
+        &self,
+        before: &std::collections::BTreeMap<String, Forward>,
+        registry: &Registry<S>,
+    ) -> Result<(), String> {
+        let mut manual: Vec<ManualForward> = read_saved(&self.manual_path)?;
+        let mut paused = self.paused_automatic_ports()?;
+        for (id, previous) in before {
+            if !previous.automatic && !registry.forwards.contains_key(id) {
+                manual.retain(|saved| !manual_matches(saved, previous));
+            }
+        }
+        for (id, current) in &registry.forwards {
+            let previous = before.get(id);
+            if current.automatic {
+                if !current.enabled && previous.is_none_or(|old| old.enabled) {
+                    paused.insert(current.remote_port);
+                } else if current.enabled && previous.is_some_and(|old| !old.enabled) {
+                    paused.remove(&current.remote_port);
+                }
+            } else {
+                let updated = manual_mapping(current);
+                if previous.map(manual_mapping).as_ref() != Some(&updated) {
+                    manual.retain(|saved| !manual_matches(saved, current));
+                    manual.push(updated);
+                }
+            }
+        }
+        write_private_json(&self.manual_path, &manual)?;
+        let mut paused = paused.into_iter().collect::<Vec<_>>();
+        paused.sort_unstable();
+        let paused = paused
+            .into_iter()
+            .map(|remote_port| PausedAutomaticForward { remote_port })
             .collect::<Vec<_>>();
-        write_private_json(&self.paused_path, &forwards)
-    }
-
-    fn persist_forward_state_locked(&self, registry: &Registry<S>) -> Result<(), String> {
-        self.persist_manual_locked(registry)
-            .map_err(|error| format!("manual forwards: {error}"))?;
-        self.persist_paused_automatic_locked(registry)
-            .map_err(|error| format!("paused automatic forwards: {error}"))?;
-        self.persist_locked(registry)
-            .map_err(|error| format!("session state: {error}"))
+        write_private_json(&self.paused_path, &paused)
     }
 
     fn mutate_and_persist<T>(
@@ -208,19 +199,55 @@ impl<S: Ssh> CompanionState<S> {
             .registry
             .lock()
             .map_err(|_| "registry unavailable".to_string())?;
+        // All companions sharing these preferences serialize their read/modify/write
+        // transaction. Only this mutation's delta is applied to the latest disk state.
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(self.manual_path.with_extension("lock"))
+            .map_err(|error| format!("failed to persist forwarding state: {error}"))?;
+        fs2::FileExt::lock_exclusive(&lock).map_err(|error| error.to_string())?;
+        let saved = [&self.manual_path, &self.paused_path]
+            .into_iter()
+            .map(|path| match std::fs::read(path) {
+                Ok(bytes) => Ok(Some(bytes)),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(error) => Err(format!("failed to persist forwarding state: {error}")),
+            })
+            .collect::<Result<Vec<_>, String>>()?;
         let snapshot = registry.snapshot();
+        let before = registry.forwards.clone();
         let mutation = mutate(&mut registry);
         if mutation.is_err() && !persist_on_mutation_error {
             return mutation;
         }
-        if let Err(persist_error) = self.persist_forward_state_locked(&registry) {
-            let rollback = registry.restore(snapshot);
-            let restore_persistence = self.persist_forward_state_locked(&registry);
+        let persistence = self
+            .persist_preferences_delta(&before, &registry)
+            .and_then(|_| self.persist_locked(&registry));
+        if let Err(persist_error) = persistence {
             let mut error = format!("failed to persist forwarding state: {persist_error}");
-            if let Err(rollback_error) = rollback {
-                error.push_str(&format!("; tunnel rollback failed: {rollback_error}"));
+            if let Err(rollback) = registry.restore(snapshot) {
+                error.push_str(&format!("; tunnel rollback failed: {rollback}"));
             }
-            if let Err(restore_error) = restore_persistence {
+            for (path, bytes) in [&self.manual_path, &self.paused_path]
+                .into_iter()
+                .zip(saved)
+            {
+                let restored = match bytes {
+                    Some(bytes) => herdr_fwd::atomic::write_file(path, &bytes, 0o600),
+                    None => match std::fs::remove_file(path) {
+                        Ok(()) => Ok(()),
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                        Err(error) => Err(error.to_string()),
+                    },
+                };
+                if let Err(restore_error) = restored {
+                    error.push_str(&format!("; rollback preferences failed: {restore_error}"));
+                }
+            }
+            if let Err(restore_error) = self.persist_locked(&registry) {
                 error.push_str(&format!(
                     "; rollback state persistence failed: {restore_error}"
                 ));
@@ -245,6 +272,35 @@ impl<S: Ssh> CompanionState<S> {
                     .collect()
             })
     }
+}
+
+fn read_saved<T: for<'de> Deserialize<'de>>(path: &std::path::Path) -> Result<Vec<T>, String> {
+    match std::fs::read(path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|error| error.to_string()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+fn manual_mapping(forward: &Forward) -> ManualForward {
+    ManualForward {
+        remote_port: forward.remote_port,
+        local_port: forward.local_port,
+        remote_host: forward.remote_host.clone(),
+        enabled: forward.enabled,
+    }
+}
+
+fn manual_matches(saved: &ManualForward, forward: &Forward) -> bool {
+    let normalize = |host: &str| {
+        if matches!(host, "::1" | "[::1]") {
+            "::1"
+        } else {
+            "127.0.0.1"
+        }
+    };
+    saved.remote_port == forward.remote_port
+        && normalize(&saved.remote_host) == normalize(&forward.remote_host)
 }
 
 pub(crate) fn manual_forwards_path(host: &str, herdr_session: &str) -> Result<PathBuf, String> {
@@ -351,15 +407,23 @@ pub(crate) fn spawn_server(
     let accept_thread = thread::spawn(move || {
         while !stop.load(Ordering::SeqCst) {
             match server.recv_timeout(Duration::from_millis(250)) {
-                Ok(Some(request)) => {
+                Ok(Some(mut stream)) => {
                     let state = Arc::clone(&state);
                     let Some(active_request) = request_tracker.begin() else {
-                        respond_error(request, 503, "companion is busy");
+                        let _ = crate::local::http::respond(
+                            &mut stream,
+                            503,
+                            "{\"error\":\"companion is busy\"}",
+                        );
                         continue;
                     };
+                    let stop = stop.clone();
                     thread::spawn(move || {
                         let _active_request = active_request;
-                        handle_request(request, &state);
+                        match Request::read(stream, &stop) {
+                            Ok(request) => handle_request(request, &state),
+                            Err(error) => debug_log(&error),
+                        }
                     });
                 }
                 Ok(None) => {}
@@ -463,19 +527,11 @@ fn handle_request(mut request: Request, state: &Arc<CompanionState<impl Ssh>>) {
                     return;
                 }
             };
-            let start_paused = payload.automatic
-                && match state.paused_automatic_ports() {
-                    Ok(ports) => ports.contains(&payload.remote_port),
-                    Err(error) => {
-                        respond_error(
-                            request,
-                            500,
-                            &format!("failed to read paused forwards: {error}"),
-                        );
-                        return;
-                    }
-                };
             let result = state.mutate_and_persist(false, |registry| {
+                let start_paused = payload.automatic
+                    && state
+                        .paused_automatic_ports()?
+                        .contains(&payload.remote_port);
                 if start_paused {
                     registry.create_paused(&payload)
                 } else {
@@ -594,35 +650,19 @@ fn handle_request(mut request: Request, state: &Arc<CompanionState<impl Ssh>>) {
 }
 
 fn authorized(request: &Request, expected_token: &str) -> bool {
-    request.headers().iter().any(|header| {
-        header.field.equiv("Authorization")
-            && header
-                .value
-                .as_str()
-                .strip_prefix("Bearer ")
-                .is_some_and(|token| constant_time_eq(token, expected_token))
-    })
+    request
+        .header("Authorization")
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .is_some_and(|token| constant_time_eq(token, expected_token))
 }
 
 fn read_json<T: for<'de> Deserialize<'de>>(request: &mut Request) -> Result<T, String> {
-    let mut body = Vec::new();
-    request
-        .as_reader()
-        .take(MAX_BODY_SIZE + 1)
-        .read_to_end(&mut body)
-        .map_err(|error| format!("failed to read request: {error}"))?;
-    if body.len() as u64 > MAX_BODY_SIZE {
-        return Err("request body is too large".into());
-    }
-    serde_json::from_slice(&body).map_err(|error| format!("invalid JSON: {error}"))
+    serde_json::from_slice(&request.body).map_err(|error| format!("invalid JSON: {error}"))
 }
 
 fn respond_json<T: Serialize>(request: Request, status: u16, value: &T) {
     let body = serde_json::to_string(value).unwrap_or_else(|_| "{}".into());
-    let response = Response::from_string(body)
-        .with_status_code(StatusCode(status))
-        .with_header(Header::from_bytes("Content-Type", "application/json").unwrap());
-    let _ = request.respond(response);
+    let _ = request.respond(status, &body);
 }
 
 fn respond_error(request: Request, status: u16, message: &str) {
@@ -751,7 +791,7 @@ mod companion_tests {
         env::set_var("HERDR_CONFIG_PATH", &config_path);
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let address = listener.local_addr().unwrap();
-        let server = Server::from_listener(listener, None).unwrap();
+        let server = Server::from_listener(listener).unwrap();
         let token = "ab".repeat(32);
         let state = Arc::new(CompanionState {
             session_id: "0123456789abcdef01234567".into(),
@@ -839,7 +879,7 @@ mod companion_tests {
     fn serves_authenticated_idempotent_forward_lifecycle() {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let address = listener.local_addr().unwrap();
-        let server = Server::from_listener(listener, None).unwrap();
+        let server = Server::from_listener(listener).unwrap();
         let temporary = RuntimeDirectory::create("herdr-rpf-companion-test-").unwrap();
         let ssh = FakeSsh::default();
         let calls = ssh.calls.clone();
@@ -963,7 +1003,7 @@ mod companion_tests {
     fn serializes_concurrent_mutations_and_publishes_valid_session_state() {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let address = listener.local_addr().unwrap();
-        let server = Server::from_listener(listener, None).unwrap();
+        let server = Server::from_listener(listener).unwrap();
         let temporary = RuntimeDirectory::create("herdr-fwd-concurrent-state-test-").unwrap();
         let token = "ab".repeat(32);
         let state = Arc::new(CompanionState {
@@ -1021,7 +1061,7 @@ mod companion_tests {
     fn reports_manual_forward_persistence_failures_to_the_client() {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let address = listener.local_addr().unwrap();
-        let server = Server::from_listener(listener, None).unwrap();
+        let server = Server::from_listener(listener).unwrap();
         let temporary = RuntimeDirectory::create("herdr-rpf-persist-error-test-").unwrap();
         let manual_path = temporary.path().join("manual-state");
         std::fs::create_dir(&manual_path).unwrap();
@@ -1067,10 +1107,7 @@ mod companion_tests {
         assert!(response.starts_with("HTTP/1.1 500"));
         assert!(response.contains("failed to persist forwarding state"));
         assert!(state.registry.lock().unwrap().forwards.is_empty());
-        assert_eq!(
-            *calls.lock().unwrap(),
-            ["forward:4173:127.0.0.1:4173", "cancel:4173:127.0.0.1:4173"]
-        );
+        assert!(calls.lock().unwrap().is_empty());
         stop.store(true, Ordering::SeqCst);
         thread.join().unwrap();
     }
@@ -1144,14 +1181,189 @@ mod companion_tests {
         };
         let forward = state.registry.lock().unwrap().create(&request).unwrap().0;
         state
-            .registry
-            .lock()
-            .unwrap()
-            .set_enabled(&forward.id, false)
+            .mutate_and_persist(false, |registry| registry.set_enabled(&forward.id, false))
             .unwrap();
 
-        state.persist_paused_automatic().unwrap();
-
         assert!(state.paused_automatic_ports().unwrap().contains(&4173));
+    }
+}
+#[cfg(test)]
+mod regression_tests {
+    use super::*;
+    use crate::local::support::RuntimeDirectory;
+    #[derive(Default)]
+    struct NoSsh;
+    impl Ssh for NoSsh {
+        fn forward(&self, _: u16, _: &str, _: u16) -> Result<(), String> {
+            Ok(())
+        }
+        fn cancel(&self, _: u16, _: &str, _: u16) -> Result<(), String> {
+            Ok(())
+        }
+    }
+    fn state(root: &std::path::Path, id: &str) -> CompanionState<NoSsh> {
+        CompanionState {
+            session_id: id.into(),
+            target: "host".into(),
+            companion_url: "http://127.0.0.1:1".into(),
+            token: "ab".repeat(32),
+            wrapper_pid: std::process::id(),
+            registry: Mutex::new(Registry::new(NoSsh)),
+            state_path: root.join(format!("{id}.json")),
+            manual_path: root.join("manual.json"),
+            paused_path: root.join("paused.json"),
+            last_heartbeat: Mutex::new(None),
+            open_new: false,
+            reconnecting: AtomicBool::new(false),
+        }
+    }
+    fn request(port: u16, automatic: bool) -> ForwardRequest {
+        ForwardRequest {
+            remote_port: port,
+            preferred_local_port: port,
+            remote_host: "127.0.0.1".into(),
+            pane_id: "p1".into(),
+            process: "test".into(),
+            detected_url: format!("http://localhost:{port}/"),
+            automatic,
+            server_started_at: None,
+            process_id: Some(1),
+        }
+    }
+    #[test]
+    fn preserve_all_saved_pauses_during_discovery() {
+        let dir = RuntimeDirectory::create("audit-pauses-").unwrap();
+        let state = state(dir.path(), "one");
+        write_private_json(
+            &state.paused_path,
+            &serde_json::json!([{"remotePort":5173},{"remotePort":6006}]),
+        )
+        .unwrap();
+        state
+            .mutate_and_persist(false, |r| r.create_paused(&request(5173, true)))
+            .unwrap();
+        assert!(
+            state.paused_automatic_ports().unwrap().contains(&6006),
+            "discovering first paused port erased the saved pause for the second"
+        );
+    }
+    #[test]
+    fn peer_mutation_preserves_manual_preferences() {
+        let dir = RuntimeDirectory::create("audit-peers-").unwrap();
+        let first = state(dir.path(), "one");
+        let second = state(dir.path(), "two");
+        first
+            .mutate_and_persist(false, |r| r.create_paused(&request(5173, false)))
+            .unwrap();
+        second
+            .mutate_and_persist(false, |r| r.create_paused(&request(6006, true)))
+            .unwrap();
+        let saved: Vec<ManualForward> =
+            serde_json::from_slice(&std::fs::read(&first.manual_path).unwrap()).unwrap();
+        assert_eq!(
+            saved.len(),
+            1,
+            "unrelated peer discovery erased persisted manual forward"
+        );
+    }
+    #[test]
+    fn shutdown_is_bounded_with_incomplete_body() {
+        use std::{
+            io::Write,
+            net::{TcpListener, TcpStream},
+            sync::mpsc,
+        };
+        let dir = RuntimeDirectory::create("audit-body-").unwrap();
+        let state = Arc::new(state(dir.path(), "one"));
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = Server::from_listener(listener).unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let server = spawn_server(server, state.clone(), stop.clone());
+        let mut stream = TcpStream::connect(address).unwrap();
+        write!(stream,"POST /v1/forwards HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {}\r\nContent-Length: 10000\r\nConnection: close\r\n\r\n{{",state.token).unwrap();
+        thread::sleep(Duration::from_millis(100));
+        assert_eq!(*server.requests.count.lock().unwrap(), 1);
+        stop.store(true, Ordering::SeqCst);
+        let (tx, rx) = mpsc::channel();
+        let join = thread::spawn(move || {
+            server.join().unwrap();
+            tx.send(()).unwrap();
+        });
+        let bounded = rx.recv_timeout(Duration::from_secs(1)).is_ok();
+        drop(stream);
+        join.join().unwrap();
+        assert!(
+            bounded,
+            "shutdown waits on request body instead of cancelling in-flight IO"
+        );
+    }
+
+    #[test]
+    fn concurrent_companions_merge_distinct_manual_changes() {
+        let dir = RuntimeDirectory::create("preferences-concurrent-").unwrap();
+        let first = Arc::new(state(dir.path(), "one"));
+        let second = Arc::new(state(dir.path(), "two"));
+        let threads = [first.clone(), second.clone()]
+            .into_iter()
+            .enumerate()
+            .map(|(index, state)| {
+                thread::spawn(move || {
+                    for port in 5000 + index as u16 * 10..5005 + index as u16 * 10 {
+                        state
+                            .mutate_and_persist(false, |r| r.create_paused(&request(port, false)))
+                            .unwrap();
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        for worker in threads {
+            worker.join().unwrap();
+        }
+        assert_eq!(
+            read_saved::<ManualForward>(&first.manual_path)
+                .unwrap()
+                .len(),
+            10
+        );
+    }
+
+    #[test]
+    fn pause_survives_process_exit_and_only_resume_clears_it() {
+        let dir = RuntimeDirectory::create("preferences-pause-").unwrap();
+        let state = state(dir.path(), "one");
+        state.registry.lock().unwrap().port_available = |_| true;
+        let (forward, _) = state
+            .mutate_and_persist(false, |r| r.create_paused(&request(5173, true)))
+            .unwrap();
+        state
+            .mutate_and_persist(false, |r| r.remove(&forward.id))
+            .unwrap();
+        assert!(state.paused_automatic_ports().unwrap().contains(&5173));
+        let (forward, _) = state
+            .mutate_and_persist(false, |r| r.create_paused(&request(5173, true)))
+            .unwrap();
+        state
+            .mutate_and_persist(false, |r| r.set_enabled(&forward.id, true))
+            .unwrap();
+        assert!(!state.paused_automatic_ports().unwrap().contains(&5173));
+    }
+
+    #[test]
+    fn failed_transaction_restores_preferences_without_erasing_peer_state() {
+        let dir = RuntimeDirectory::create("preferences-rollback-").unwrap();
+        let first = state(dir.path(), "one");
+        let second = state(dir.path(), "two");
+        first
+            .mutate_and_persist(false, |r| r.create_paused(&request(5173, false)))
+            .unwrap();
+        std::fs::create_dir(&second.state_path).unwrap();
+        assert!(second
+            .mutate_and_persist(false, |r| r.create_paused(&request(6006, false)))
+            .is_err());
+        let saved = read_saved::<ManualForward>(&first.manual_path).unwrap();
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].remote_port, 5173);
+        assert!(second.registry.lock().unwrap().forwards.is_empty());
     }
 }

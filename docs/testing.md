@@ -314,6 +314,7 @@ The fixture creates temporary keys/configuration, a loopback-only SSH listener,
 and a uniquely named Herdr session. It creates and removes only that session's
 remote forwarding cache directory. It verifies delayed listener discovery,
 HTTP traffic through forwarded ports, collision handling, paused state across
-transport recovery, two connectors, ambiguous dashboard rejection, and cleanup
-on normal exit and sustained outage. Failure logs are kept under
+transport recovery, dashboard preservation across a 12-second outage, two
+connectors, ambiguous dashboard rejection, and cleanup on normal exit and
+sustained outage. Failure logs are kept under
 `target/ssh-e2e-failure`; session files and bearer tokens are not copied there.

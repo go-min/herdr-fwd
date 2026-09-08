@@ -118,6 +118,10 @@ therefore cannot discard a live session's management token. State files are
 user-only and contain the ephemeral token needed by these local commands; they
 must not be copied into logs or support bundles.
 
+`hfwd close` requires exactly one matching forward across all active sessions.
+If an ID or local port is ambiguous, it makes no changes; use a unique local
+port or the intended session's dashboard.
+
 ## Uninstall
 
 Remove the plugin from the current machine:

@@ -29,6 +29,15 @@ Versioning.
 
 ### Fixed
 
+- Refuse ambiguous `hfwd close` selectors before deleting any forwards.
+- Bound companion HTTP reads and cancel incomplete requests during shutdown.
+- Merge shared forwarding preferences under a file lock and retain pauses for
+  ports that have not yet been rediscovered or whose process has exited.
+- Preserve the forwarding dashboard throughout recoverable SSH outages.
+- Terminate SSH command process groups so proxy descendants cannot keep timed
+  operations waiting on captured output.
+- Handle Unicode safely after unknown terminal escape sequences.
+
 - Subscribe before the initial discovery snapshot and rescan immediately after
   reconnecting the event stream, matching Herdr 0.9's live-only subscriptions.
 - Serialize configuration writes across companions to preserve simultaneous
