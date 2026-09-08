@@ -7,7 +7,7 @@ use herdr_fwd::herdr_session_storage_key;
 use herdr_fwd::RemoteSessionConfig;
 use serde::{Deserialize, Serialize};
 
-use crate::plugin::{herdr::herdr_output, rpc::list_forwards};
+use crate::plugin::{herdr::herdr_output, rpc::api_request};
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -99,27 +99,51 @@ pub(crate) fn installation_state_directory() -> Result<PathBuf, String> {
 }
 
 pub(crate) fn active_session_path() -> Result<PathBuf, String> {
+    optional_active_session_path()?.ok_or_else(|| "no reachable remote-forward session".into())
+}
+
+pub(crate) fn optional_active_session_path() -> Result<Option<PathBuf>, String> {
+    if let Some(explicit) = env::var_os("HERDR_FWD_SESSION_PATH").filter(|path| !path.is_empty()) {
+        let path = PathBuf::from(explicit);
+        let config: RemoteSessionConfig = read_json_file(&path)?;
+        config.validate()?;
+        validate_current_herdr_session(&config)?;
+        api_request::<serde_json::Value>(&config, "GET", "/v1/settings/local", None)?;
+        return Ok(Some(path));
+    }
     let directory = session_directory()?;
-    let mut sessions = fs::read_dir(&directory)
-        .map_err(|error| format!("{}: {error}", directory.display()))?
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|path| is_session_file(path))
-        .collect::<Vec<_>>();
-    sessions.sort_by_key(|path| {
-        fs::metadata(path)
-            .and_then(|metadata| metadata.modified())
-            .ok()
-    });
-    sessions
-        .into_iter()
-        .rev()
-        .find(|path| {
-            read_json_file::<RemoteSessionConfig>(path)
-                .ok()
-                .is_some_and(|config| list_forwards(&config).is_ok())
-        })
-        .ok_or_else(|| "no reachable remote-forward session".to_string())
+    let entries = match fs::read_dir(&directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("{}: {error}", directory.display())),
+    };
+    let mut candidates = Vec::new();
+    for entry in entries {
+        let path = entry.map_err(|error| error.to_string())?.path();
+        if !is_session_file(&path) {
+            continue;
+        }
+        let config: RemoteSessionConfig = read_json_file(&path)?;
+        config.validate()?;
+        validate_current_herdr_session(&config)?;
+        candidates.push(path);
+    }
+    // A temporarily unreachable connector is still a candidate. Do not route
+    // its action to another connector (or the host's local config) during an outage.
+    let selected = unique_session_path(candidates)?;
+    if let Some(path) = &selected {
+        let config: RemoteSessionConfig = read_json_file(path)?;
+        api_request::<serde_json::Value>(&config, "GET", "/v1/settings/local", None)?;
+    }
+    Ok(selected)
+}
+
+fn unique_session_path(mut candidates: Vec<PathBuf>) -> Result<Option<PathBuf>, String> {
+    match candidates.len() {
+        0 => Ok(None),
+        1 => Ok(candidates.pop()),
+        count => Err(format!("{count} forwarding sessions are registered; open the dashboard in your forwarding Space, or set HERDR_FWD_SESSION_PATH to the intended session file")),
+    }
 }
 
 pub(crate) fn is_session_file(path: &Path) -> bool {
@@ -245,6 +269,22 @@ mod session_tests {
         dashboard_marker_path, herdr_session_from_inputs, is_session_file, read_json_file,
         write_json_file, DashboardMarker,
     };
+
+    #[test]
+    fn session_selection_never_guesses_between_connectors() {
+        let first = PathBuf::from("session-first.json");
+        let second = PathBuf::from("session-second.json");
+        assert_eq!(super::unique_session_path(Vec::new()).unwrap(), None);
+        assert_eq!(
+            super::unique_session_path(vec![first.clone()]).unwrap(),
+            Some(first.clone())
+        );
+        for candidates in [vec![first.clone(), second.clone()], vec![second, first]] {
+            let error = super::unique_session_path(candidates).unwrap_err();
+            assert!(error.contains("2 forwarding sessions"));
+            assert!(error.contains("HERDR_FWD_SESSION_PATH"));
+        }
+    }
 
     struct TestDirectory(PathBuf);
 

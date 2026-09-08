@@ -33,7 +33,7 @@ $(error usage: run, attach, and lima-run must be invoked separately)
 endif
 endif
 
-.PHONY: help fmt fmt-check lint markdown-check markdown-fix deps-check test build demo package package-smoke release-check ci manifest-check scripts-check \
+.PHONY: help fmt fmt-check lint markdown-check markdown-fix deps-check test test-ssh build demo package package-smoke release-check ci manifest-check scripts-check \
 	install uninstall run attach serve lima-up lima-run lima-down lima-destroy \
 	lima-status lima-shell
 
@@ -72,6 +72,9 @@ markdown-fix: ## Core|Format fixable Markdown violations
 deps-check: ## Core|Run dependency policy checks
 	$(CARGO) deny check
 
+test-ssh: build ## Core|Run isolated real SSH/Herdr integration checks
+	python3 scripts/test-ssh-e2e.py
+
 test: ## Core|Run unit and integration tests
 	$(CARGO) test --locked --all-targets
 
@@ -96,7 +99,7 @@ scripts-check:
 	bash -n .github/assets/demo/setup.sh .github/assets/demo/overview.sh
 	sh scripts/test-homebrew-formula.sh
 	PYTHONPYCACHEPREFIX="$${TMPDIR:-/tmp}/herdr-fwd-pycache" python3 -m py_compile \
-		scripts/check-manifest.py scripts/test-dev-server
+		scripts/check-manifest.py scripts/test-dev-server scripts/test-ssh-e2e.py .github/assets/demo/companion.py
 	scripts/test-dev-server --self-test
 	shellcheck install.sh uninstall.sh scripts/*.sh .github/assets/demo/*.sh .github/assets/demo/herdr
 

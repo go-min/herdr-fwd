@@ -32,9 +32,9 @@ use crate::local::{
         doctor, require_herdr_compatibility, require_local_herdr_compatibility, require_ssh,
         secure_random_hex, state_directory, RuntimeDirectory,
     },
+    transport::TransportSupervisor,
 };
 
-const LEASE_TIMEOUT: Duration = Duration::from_secs(10);
 const HEARTBEAT_STARTUP_TIMEOUT: Duration = Duration::from_secs(20);
 
 struct Cli {
@@ -133,6 +133,7 @@ fn run() -> Result<(), String> {
         paused_path: paused_forwards_path(&host_key, &herdr_session)?,
         last_heartbeat: Mutex::new(None),
         open_new: cli.open,
+        reconnecting: AtomicBool::new(false),
     });
     companion.restore_manual()?;
     companion.persist()?;
@@ -158,7 +159,16 @@ fn run() -> Result<(), String> {
             companion.session_id
         );
     }
-    let attach_result = run_attach(&cli, &companion, &stop_requested);
+    let transport = TransportSupervisor::start(
+        master,
+        client.clone(),
+        companion.clone(),
+        companion_port,
+        remote_path.clone(),
+        remote_config,
+    );
+    let attach_result = run_attach(&cli, &companion, &stop_requested, &transport);
+    let master = transport.finish();
 
     server_stop.store(true, Ordering::SeqCst);
     let _ = server_thread.join();
@@ -389,6 +399,7 @@ fn run_attach(
     cli: &Cli,
     companion: &Arc<CompanionState<SshClient>>,
     stop_requested: &AtomicBool,
+    transport: &TransportSupervisor,
 ) -> Result<(), String> {
     let mut arguments = vec!["--remote".to_string(), cli.target.clone()];
     arguments.extend(cli.herdr_arguments.iter().cloned());
@@ -409,15 +420,18 @@ fn run_attach(
             .last_heartbeat
             .lock()
             .map_err(|_| "heartbeat lock poisoned".to_string())?;
-        if last_heartbeat.is_none() && attach_started.elapsed() > HEARTBEAT_STARTUP_TIMEOUT {
+        if let Some(error) = transport.failure() {
+            terminate_child(&mut child);
+            return Err(error);
+        }
+        if last_heartbeat.is_none()
+            && !companion.reconnecting.load(Ordering::SeqCst)
+            && attach_started.elapsed() > HEARTBEAT_STARTUP_TIMEOUT
+        {
             terminate_child(&mut child);
             return Err(
                 "remote plugin did not start; run doctor and verify the plugin is enabled".into(),
             );
-        }
-        if last_heartbeat.is_some_and(|heartbeat| heartbeat.elapsed() > LEASE_TIMEOUT) {
-            terminate_child(&mut child);
-            return Err("remote plugin heartbeat expired; forwards were closed".into());
         }
         match child.try_wait() {
             Ok(Some(status)) if status.success() => return Ok(()),

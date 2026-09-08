@@ -700,6 +700,39 @@ fn collect_values(value: &Value, key: &str, visit: &mut impl FnMut(&Value)) {
     }
 }
 
+/// Foreground identity polling avoids listener inspection while panes are idle.
+#[cfg(unix)]
+pub(crate) fn foreground_process_fingerprint() -> Result<Vec<(String, String)>, String> {
+    let started = Instant::now();
+    let panes = socket_request("pane.list", serde_json::json!({}))?;
+    let mut ids = collect_string_values(&panes, "pane_id");
+    ids.sort();
+    ids.dedup();
+    let mut fingerprint = Vec::new();
+    for pane_id in ids {
+        if started.elapsed() >= RECONCILIATION_COMMAND_TIMEOUT {
+            return Err("foreground probe exceeded its time budget".into());
+        }
+        let info = socket_request("pane.process_info", serde_json::json!({"pane_id": pane_id}))?;
+        let processes = collect_array_values(&info, "foreground_processes");
+        let mut identities = processes
+            .iter()
+            .map(|process| {
+                serde_json::json!({
+                    "pid": process.get("pid"),
+                    "name": process.get("name"),
+                    "argv": process.get("argv"),
+                    "cmdline": process.get("cmdline"),
+                })
+                .to_string()
+            })
+            .collect::<Vec<_>>();
+        identities.sort();
+        fingerprint.push((pane_id, identities.join("\n")));
+    }
+    Ok(fingerprint)
+}
+
 pub(crate) fn focus_pane(pane_id: &str) -> Result<(), String> {
     #[cfg(unix)]
     {
@@ -814,6 +847,12 @@ fn socket_request(method: &str, params: Value) -> Result<Value, String> {
     let socket = herdr_socket_path()?;
     let mut stream = UnixStream::connect(socket)
         .map_err(|error| format!("failed to connect to Herdr socket: {error}"))?;
+    stream
+        .set_read_timeout(Some(RECONCILIATION_COMMAND_TIMEOUT))
+        .map_err(|error| error.to_string())?;
+    stream
+        .set_write_timeout(Some(RECONCILIATION_COMMAND_TIMEOUT))
+        .map_err(|error| error.to_string())?;
     let request = serde_json::json!({
         "id": "herdr-fwd:request",
         "method": method,

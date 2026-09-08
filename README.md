@@ -160,6 +160,13 @@ If local port `5173` is occupied, the next available loopback port is selected.
 Stopping the owning process removes all of its forwards. Exiting the attached
 Herdr client closes the `hfwd`-owned SSH master, forwards, and session state.
 
+If the companion SSH connection drops, `hfwd` attempts to restore it for up to
+30 seconds without requesting credentials. It restores enabled mappings and
+keeps paused mappings paused. A local port occupied during the outage is
+reassigned; check the dashboard for the updated URL. If recovery fails, the
+wrapper exits and closes its remaining forwards. SSH agent/key authentication
+must remain available for unattended recovery.
+
 ## Common commands
 
 ```bash
@@ -211,6 +218,11 @@ In Herdr 0.9, sidebar layout and notification delivery belong to the local
 client. Dashboard settings (`h`) update that machine through `hfwd`; apply them
 with **reload config** in Herdr's menu, or detach and reconnect. The popup
 shortcut remains in the remote configuration and uses `--remote-keybindings server`.
+
+When several `hfwd` clients share the remote Herdr session, use your existing
+forwarding Space dashboard. Generic popup actions require an explicit
+`HERDR_FWD_SESSION_PATH` rather than selecting another client's mappings.
+Source-pane focus through Herdr's public API affects all attached clients.
 
 The main actions are:
 

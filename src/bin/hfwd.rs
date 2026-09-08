@@ -6,6 +6,7 @@ mod local {
     pub(crate) mod remote_management;
     pub(crate) mod ssh;
     pub(crate) mod support;
+    pub(crate) mod transport;
 }
 
 fn main() {

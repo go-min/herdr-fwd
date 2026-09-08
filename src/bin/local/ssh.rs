@@ -2,6 +2,7 @@ use std::{
     io::{Read, Write},
     path::Path,
     process::{Child, Command, Stdio},
+    sync::atomic::{AtomicBool, Ordering},
     thread,
     time::{Duration, Instant},
 };
@@ -43,7 +44,7 @@ impl SshClient {
         }
     }
 
-    fn start_master(&self) -> Result<Child, String> {
+    fn start_master(&self, reconnecting: bool, stop: &AtomicBool) -> Result<Child, String> {
         let mut child = Command::new("ssh")
             .args([
                 "-M",
@@ -56,12 +57,24 @@ impl SshClient {
                 "-o",
                 "ExitOnForwardFailure=yes",
                 "-o",
-                "ServerAliveInterval=15",
+                "ServerAliveInterval=3",
                 "-o",
-                "ServerAliveCountMax=3",
-                &self.target,
-                "cat >/dev/null",
+                "ServerAliveCountMax=2",
+                "-o",
+                if reconnecting {
+                    "ConnectTimeout=3"
+                } else {
+                    "ConnectTimeout=10"
+                },
+                "-o",
+                "ConnectionAttempts=1",
             ])
+            .args(if reconnecting {
+                &["-o", "BatchMode=yes"][..]
+            } else {
+                &[][..]
+            })
+            .args([self.target.as_str(), "cat >/dev/null"])
             // The remote `cat` is a lifetime guard. If the wrapper is killed
             // without running Drop, the OS closes this pipe, the primary SSH
             // session exits, and ControlPersist=no tears down every forward.
@@ -69,7 +82,9 @@ impl SshClient {
             .stdout(Stdio::null())
             .spawn()
             .map_err(|error| format!("failed to start SSH master: {error}"))?;
-        for _ in 0..300 {
+        let started = Instant::now();
+        let timeout = Duration::from_secs(if reconnecting { 4 } else { 60 });
+        while started.elapsed() < timeout && !stop.load(Ordering::SeqCst) {
             if self
                 .invoke(&[
                     "-S".into(),
@@ -92,7 +107,14 @@ impl SshClient {
         }
         let _ = child.kill();
         let _ = child.wait();
-        Err("SSH master did not become ready within 60 seconds".into())
+        Err(if stop.load(Ordering::SeqCst) {
+            "SSH connection cancelled".into()
+        } else {
+            format!(
+                "SSH master did not become ready within {} seconds",
+                timeout.as_secs()
+            )
+        })
     }
 
     pub(crate) fn reverse(&self, remote_port: u16, local_port: u16) -> Result<(), String> {
@@ -103,7 +125,7 @@ impl SshClient {
             "-R",
             &format!("127.0.0.1:{remote_port}:127.0.0.1:{local_port}"),
         );
-        self.invoke(&arguments)?;
+        self.invoke_with_timeout(&arguments, SSH_FORWARD_TIMEOUT, "SSH reverse forward")?;
         Ok(())
     }
 
@@ -120,6 +142,10 @@ impl SshClient {
             &[
                 "-S".into(),
                 self.control_path.display().to_string(),
+                "-o".into(),
+                "BatchMode=yes".into(),
+                "-o".into(),
+                "ConnectTimeout=3".into(),
                 self.target.clone(),
                 command.into(),
             ],
@@ -146,6 +172,10 @@ impl SshClient {
             .args([
                 "-S",
                 &self.control_path.display().to_string(),
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=3",
                 &self.target,
                 command,
             ])
@@ -320,8 +350,23 @@ pub(crate) struct OwnedMaster {
 
 impl OwnedMaster {
     pub(crate) fn start(client: SshClient) -> Result<Self, String> {
-        let child = client.start_master()?;
+        let child = client.start_master(false, &AtomicBool::new(false))?;
         Ok(Self { client, child })
+    }
+
+    pub(crate) fn reconnect(client: SshClient, stop: &AtomicBool) -> Result<Self, String> {
+        let child = client.start_master(true, stop)?;
+        Ok(Self { client, child })
+    }
+
+    pub(crate) fn is_alive(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(None))
+    }
+
+    pub(crate) fn terminate(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        let _ = std::fs::remove_file(&self.client.control_path);
     }
 }
 

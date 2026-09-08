@@ -355,6 +355,39 @@ impl<S: Ssh> Registry<S> {
             .ok_or_else(|| "no available local port".to_string())
     }
 
+    /// Rebuild enabled mappings on a fresh transport. Keep user-paused entries
+    /// and mapping IDs; publish new ports/timestamps only after every open succeeds.
+    pub fn restore_tunnels(&mut self, cancelled: impl Fn() -> bool) -> Result<(), String> {
+        let mut restored = self.forwards.clone();
+        let mut opened: Vec<Forward> = Vec::new();
+        let result = (|| {
+            for (id, forward) in restored.iter_mut().filter(|(_, forward)| forward.enabled) {
+                if cancelled() {
+                    return Err("tunnel recovery cancelled".into());
+                }
+                let port = self.available_port(forward.local_port, Some(id))?;
+                self.ssh
+                    .forward(port, &forward.remote_host, forward.remote_port)?;
+                forward.local_port = port;
+                forward.tunnel_opened_at = (self.now)();
+                opened.push(forward.clone());
+            }
+            Ok(())
+        })();
+        if let Err(error) = result {
+            for forward in opened {
+                let _ = self.ssh.cancel(
+                    forward.local_port,
+                    &forward.remote_host,
+                    forward.remote_port,
+                );
+            }
+            return Err(error);
+        }
+        self.forwards = restored;
+        Ok(())
+    }
+
     pub fn close_all(&mut self) -> Vec<String> {
         let ids = self.forwards.keys().cloned().collect::<Vec<_>>();
         ids.into_iter()
@@ -449,6 +482,58 @@ mod tests {
             server_started_at: None,
             process_id: None,
         }
+    }
+
+    #[test]
+    fn recovery_preserves_ids_and_pauses_while_remapping_occupied_ports() {
+        let mut registry = Registry::new(FakeSsh::default());
+        registry.port_available = |_| true;
+        let (active, _) = registry.create(&request()).unwrap();
+        let mut manual = request();
+        manual.remote_port = 6006;
+        manual.preferred_local_port = 6006;
+        manual.detected_url = "http://localhost:6006/".into();
+        manual.automatic = false;
+        let (paused, _) = registry.create(&manual).unwrap();
+        registry.set_enabled(&paused.id, false).unwrap();
+        registry.port_available = |port| port != 5173;
+        registry.now = || 123456;
+        registry.restore_tunnels(|| false).unwrap();
+        assert_eq!(registry.forwards[&active.id].local_port, 5174);
+        assert_eq!(registry.forwards[&active.id].tunnel_opened_at, 123456);
+        assert_eq!(registry.forwards[&active.id].remote_port, 5173);
+        assert!(!registry.forwards[&paused.id].enabled);
+        assert!(!registry.forwards[&paused.id].automatic);
+        assert_eq!(registry.forwards[&paused.id].tunnel_opened_at, 0);
+    }
+
+    #[test]
+    fn partial_recovery_cancels_opened_tunnels_without_publishing_partial_state() {
+        let mut registry = Registry::new(FakeSsh::default());
+        registry.port_available = |_| true;
+        registry.create(&request()).unwrap();
+        let mut second = request();
+        second.remote_port = 6006;
+        second.preferred_local_port = 6006;
+        second.detected_url = "http://localhost:6006/".into();
+        registry.create(&second).unwrap();
+        let before = registry.forwards.clone();
+        registry.ssh.calls.lock().unwrap().clear();
+        registry.ssh.fail_forward_on = Some(6006);
+        assert!(registry.restore_tunnels(|| false).is_err());
+        assert_eq!(registry.forwards, before);
+        assert_eq!(
+            *registry.ssh.calls.lock().unwrap(),
+            [
+                "forward:5173:127.0.0.1:5173",
+                "forward:6006:127.0.0.1:6006",
+                "cancel:5173:127.0.0.1:5173"
+            ]
+        );
+        registry.ssh.calls.lock().unwrap().clear();
+        assert!(registry.restore_tunnels(|| true).is_err());
+        assert!(registry.ssh.calls.lock().unwrap().is_empty());
+        assert_eq!(registry.forwards, before);
     }
 
     #[test]

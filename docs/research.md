@@ -61,4 +61,7 @@ plugins published later.
 - The local smoke check exercised real pane events, process inspection,
   loopback listener discovery, metadata writes, plugin linking, popup open/close,
   split dashboards, and removal cleanup with a mock HTTP companion. It did not
-  validate SSH reconnects or independent multi-client UI interaction.
+  validate independent multi-client UI interaction. The subsequent
+  `make test-ssh` fixture additionally validates real loopback SSH attach,
+  delayed discovery, transport recovery, port conflicts, multiple connectors,
+  and shutdown cleanup.

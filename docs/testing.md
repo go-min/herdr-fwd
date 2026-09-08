@@ -13,7 +13,7 @@ The repository follows these placement rules:
 - black-box integration tests live under Cargo's conventional top-level
   `tests/` directory and use only the crate's public API.
 
-There is currently no standalone black-box integration target. End-to-end SSH,
+The `make test-ssh` target runs a standalone real SSH/Herdr integration test. End-to-end SSH,
 Herdr, process discovery, and forwarding behavior is exercised with the Lima
 scenario below. There are no shared catch-all `src/tests.rs` or
 `src/bin/**/tests.rs` files.
@@ -292,8 +292,28 @@ server reload alone must not be treated as applying client presentation changes.
 Check that the popup shortcut still edits the remote server's bindings.
 
 Start a listener immediately after attaching and after a watcher event-stream
-reconnect. Check discovery after pane lifecycle/metadata events and through the
-15-second fallback when no such event is emitted: `pane.updated` is not a raw
-output stream. Test popup open/close, split dashboards, source-pane focus, and removal
-of all forwards when the source process exits. Public source-pane focus currently
+reconnect. Check foreground identity probes and settling scans as well as pane
+lifecycle/metadata events. The 15-second fallback still covers late listeners
+inside unchanged processes: `pane.updated` is not a raw output stream. Test popup
+open/close, split dashboards, source-pane focus, and removal of all forwards when
+the source process exits. Public source-pane focus currently
 affects all Herdr clients attached to the server; it is not client-scoped.
+
+## Isolated loopback SSH test
+
+```bash
+make test-ssh
+```
+
+Requires Unix, Herdr 0.9.x, Python 3.11+, OpenSSH client/server (`sshd`),
+`ssh-keygen`, `ps`, and `lsof`. This uses real Herdr, `hfwd`, and SSH transport;
+only SSH configuration is redirected to the fixture. No SSH daemon or key is
+installed globally. Some environments require permission to run a local sshd.
+
+The fixture creates temporary keys/configuration, a loopback-only SSH listener,
+and a uniquely named Herdr session. It creates and removes only that session's
+remote forwarding cache directory. It verifies delayed listener discovery,
+HTTP traffic through forwarded ports, collision handling, paused state across
+transport recovery, two connectors, ambiguous dashboard rejection, and cleanup
+on normal exit and sustained outage. Failure logs are kept under
+`target/ssh-e2e-failure`; session files and bearer tokens are not copied there.

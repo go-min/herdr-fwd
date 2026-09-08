@@ -58,7 +58,11 @@ pub(crate) fn handle_dashboard_key_with_session_path(
         }
         KeyCode::Enter => {
             if let Some(forward) = forwards.get(state.selected) {
-                set_message(state, focus_pane(&forward.pane_id), "Focused source pane");
+                set_message(
+                    state,
+                    focus_pane(&forward.pane_id),
+                    "Focused source pane for all attached Herdr clients",
+                );
             }
         }
         KeyCode::Char(_) if is_shortcut(key, 'k') => {

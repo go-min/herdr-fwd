@@ -5,8 +5,21 @@ Versioning.
 
 ## [Unreleased]
 
+### Added
+
+- Automatically recover the wrapper-owned SSH transport and reverse RPC channel
+  after a disconnect, with bounded non-interactive retries and mapping replay.
+- Add `make test-ssh` to exercise real Herdr and SSH with isolated loopback
+  configuration, occupied ports, delayed listeners, recovery, and cleanup.
+
 ### Changed
 
+- Poll foreground process identities every two seconds; perform short settling
+  scans when processes change and retain the 15-second reconciliation fallback.
+- Preserve mapping IDs and paused state during recovery, selecting a new local
+  port if the previous port has become occupied.
+- Require an explicit forwarding session when several connectors are active,
+  instead of guessing from session-file timestamps.
 - Require Herdr 0.9.x on both the connecting and hosting machines.
 - Apply dashboard sidebar and notification settings to the connecting client's
   configuration through the authenticated companion. Keep plugin shortcuts in

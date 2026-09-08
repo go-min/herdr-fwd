@@ -73,15 +73,17 @@ and Herdr session. They survive reconnects to the same target session without
 being shared across hosts or named sessions. Ephemeral tokens and active state
 remain attach-scoped.
 
-The remote watcher holds a lock per Herdr socket/session, subscribes to pane updates and
-lifecycle events with a 15-second reconciliation fallback, and associates each
-batched `lsof` listener with its foreground process, merging Linux `ss` results
-when available. One process may therefore produce multiple forwards. An
+The remote watcher holds a lock per Herdr socket/session, subscribes to pane
+lifecycle/metadata events, and probes foreground identities every two seconds.
+Process changes trigger settling scans; a 15-second reconciliation fallback
+covers listeners that start later without changing process identity. It
+associates each batched `lsof` listener with its foreground process, merging
+Linux `ss` results when available. One process may therefore produce multiple forwards. An
 independent worker sends a two-second heartbeat; only repeated heartbeat
 failures remove a stale session, so slow discovery cannot expire a healthy
-attach. The local companion expires its lease after ten
-seconds, terminates the attach, retries forward cleanup, closes its owned SSH
-master, and removes local runtime state. The SSH master remains an owned child
+attach. Ten seconds without a heartbeat trigger transport recovery. If recovery
+fails within its retry budget, the wrapper terminates the attach, retries
+forward cleanup, closes its owned SSH master, and removes local runtime state. The SSH master remains an owned child
 process rather than a daemonized `ssh -f`; the wrapper handles SIGINT, SIGTERM,
 and SIGHUP and has a kill fallback after the normal OpenSSH exit request. Its
 primary SSH session is held by a parent-owned stdin pipe, so even SIGKILL closes
@@ -129,3 +131,21 @@ arbitrary configuration patch. Shared TOML transformations preserve unrelated
 settings, with a stable file lock and atomic replacement for concurrent writers.
 Plugin shortcut bindings remain server-side. Client presentation reload is
 performed from Herdr's menu, since the public server reload API is insufficient.
+
+## SSH recovery
+
+A transport supervisor owns the private SSH master on a worker thread. It
+checks process liveness and companion heartbeat expiry while the main thread
+continues handling Herdr exit and signals. Recovery rejects forwarding API
+requests with 503, while authenticated heartbeats and settings remain available.
+
+The old master is terminated before reconnecting. A fresh reverse RPC tunnel is
+allocated, enabled mappings are replayed, and the current remote session file is
+published atomically. The watcher is woken again if it exited during the outage.
+Recovery is complete only after a fresh authenticated heartbeat arrives through
+the restored reverse channel.
+Replay preserves mapping IDs and paused state; conflicting local ports move to
+the next available port. Partial replay cancels newly opened tunnels, and the
+attempt's master is terminated before retry. Registry state is published only
+once the entire replay succeeds. Retries stop after a 30-second budget, with
+bounded SSH operations and cancellation checks between steps.

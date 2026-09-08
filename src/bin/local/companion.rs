@@ -89,6 +89,7 @@ pub(crate) struct CompanionState<S: Ssh> {
     pub(crate) paused_path: PathBuf,
     pub(crate) last_heartbeat: Mutex<Option<Instant>>,
     pub(crate) open_new: bool,
+    pub(crate) reconnecting: AtomicBool,
 }
 
 impl<S: Ssh> CompanionState<S> {
@@ -100,7 +101,7 @@ impl<S: Ssh> CompanionState<S> {
         self.persist_locked(&registry)
     }
 
-    fn persist_locked(&self, registry: &Registry<S>) -> Result<(), String> {
+    pub(crate) fn persist_locked(&self, registry: &Registry<S>) -> Result<(), String> {
         let forwards = registry.forwards.values().cloned().collect();
         write_private_json(
             &self.state_path,
@@ -399,6 +400,10 @@ fn handle_request(mut request: Request, state: &Arc<CompanionState<impl Ssh>>) {
         respond_error(request, 401, "unauthorized");
         return;
     }
+    if path.starts_with("/v1/forwards") && state.reconnecting.load(Ordering::SeqCst) {
+        respond_error(request, 503, "SSH connection is recovering; retry shortly");
+        return;
+    }
     match (method, path.as_str()) {
         (Method::Get, "/v1/settings/local") => {
             match herdr_fwd::herdr_config::dashboard_setup_status() {
@@ -625,7 +630,18 @@ fn respond_error(request: Request, status: u16, message: &str) {
 }
 
 pub(crate) fn establish_reverse_rpc(client: &SshClient, local_port: u16) -> Result<u16, String> {
+    establish_reverse_rpc_until(client, local_port, || false)
+}
+
+pub(crate) fn establish_reverse_rpc_until(
+    client: &SshClient,
+    local_port: u16,
+    cancelled: impl Fn() -> bool,
+) -> Result<u16, String> {
     for _ in 0..20 {
+        if cancelled() {
+            return Err("reverse tunnel recovery cancelled".into());
+        }
         let bytes = secure_random_bytes(2)?;
         let candidate = 20_000 + (u16::from_be_bytes([bytes[0], bytes[1]]) % 30_000);
         if client.reverse(candidate, local_port).is_ok() {
@@ -749,6 +765,7 @@ mod companion_tests {
             paused_path: temporary.path().join("paused.json"),
             last_heartbeat: Mutex::new(None),
             open_new: false,
+            reconnecting: AtomicBool::new(false),
         });
         let stop = Arc::new(AtomicBool::new(false));
         let server_thread = spawn_server(server, state.clone(), stop.clone());
@@ -839,6 +856,7 @@ mod companion_tests {
             paused_path: temporary.path().join("paused.json"),
             last_heartbeat: Mutex::new(None),
             open_new: false,
+            reconnecting: AtomicBool::new(false),
         });
         state.registry.lock().unwrap().port_available = |_| true;
         let stop = Arc::new(AtomicBool::new(false));
@@ -857,6 +875,13 @@ mod companion_tests {
             &format!("GET /v1/forwards HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n\r\n"),
         );
         assert!(unauthorized.starts_with("HTTP/1.1 401"));
+
+        state.reconnecting.store(true, Ordering::SeqCst);
+        let unavailable = http_request(&base, &token, "GET", "/v1/forwards", None).unwrap_err();
+        assert!(unavailable.starts_with("HTTP/1.1 503"));
+        let heartbeat = http_request(&base, &token, "POST", "/v1/heartbeat", None).unwrap();
+        assert!(heartbeat.starts_with("HTTP/1.1 200"));
+        state.reconnecting.store(false, Ordering::SeqCst);
 
         let payload = serde_json::json!({
             "remotePort": 5173,
@@ -953,6 +978,7 @@ mod companion_tests {
             paused_path: temporary.path().join("paused.json"),
             last_heartbeat: Mutex::new(None),
             open_new: false,
+            reconnecting: AtomicBool::new(false),
         });
         state.registry.lock().unwrap().port_available = |_| true;
         let stop = Arc::new(AtomicBool::new(false));
@@ -1014,6 +1040,7 @@ mod companion_tests {
             paused_path: temporary.path().join("paused.json"),
             last_heartbeat: Mutex::new(None),
             open_new: false,
+            reconnecting: AtomicBool::new(false),
         });
         state.registry.lock().unwrap().port_available = |_| true;
         let stop = Arc::new(AtomicBool::new(false));
@@ -1076,6 +1103,7 @@ mod companion_tests {
             paused_path: temporary.path().join("paused.json"),
             last_heartbeat: Mutex::new(None),
             open_new: false,
+            reconnecting: AtomicBool::new(false),
         };
 
         state.restore_manual().unwrap();
@@ -1101,6 +1129,7 @@ mod companion_tests {
             paused_path: path,
             last_heartbeat: Mutex::new(None),
             open_new: false,
+            reconnecting: AtomicBool::new(false),
         };
         let request = ForwardRequest {
             remote_port: 4173,

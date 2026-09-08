@@ -193,6 +193,9 @@ fn watch_loop() -> Result<(), String> {
     let mut events = crate::plugin::herdr::EventSubscriber::connect().ok();
     scan_once()?;
     let mut last_reconciliation = Instant::now();
+    #[cfg(unix)]
+    let mut foreground = ForegroundProbe::default();
+    let mut last_probe = Instant::now() - HEARTBEAT_INTERVAL;
     loop {
         #[cfg(unix)]
         let event_received = {
@@ -226,10 +229,41 @@ fn watch_loop() -> Result<(), String> {
         if session_files(false)?.is_empty() {
             return Ok(());
         }
-        if event_received || last_reconciliation.elapsed() >= RECONCILIATION_INTERVAL {
+        let mut foreground_changed = false;
+        if last_probe.elapsed() >= HEARTBEAT_INTERVAL {
+            #[cfg(unix)]
+            if let Ok(fingerprint) = crate::plugin::herdr::foreground_process_fingerprint() {
+                foreground_changed = foreground.observe(fingerprint, Instant::now());
+            }
+            last_probe = Instant::now();
+        }
+        if event_received
+            || foreground_changed
+            || last_reconciliation.elapsed() >= RECONCILIATION_INTERVAL
+        {
             scan_once()?;
             last_reconciliation = Instant::now();
         }
+    }
+}
+
+#[cfg(unix)]
+#[derive(Default)]
+struct ForegroundProbe {
+    previous: Option<Vec<(String, String)>>,
+    settle_until: Option<Instant>,
+}
+
+#[cfg(unix)]
+impl ForegroundProbe {
+    fn observe(&mut self, fingerprint: Vec<(String, String)>, now: Instant) -> bool {
+        if self.previous.as_ref() != Some(&fingerprint) {
+            self.previous = Some(fingerprint);
+            // A process can appear before its listener binds (e.g. dev startup).
+            self.settle_until = Some(now + Duration::from_secs(6));
+            return true;
+        }
+        self.settle_until.is_some_and(|deadline| now <= deadline)
     }
 }
 
@@ -766,7 +800,7 @@ fn dashboard_current() -> Result<(), String> {
 }
 
 fn enable_sidebar_status() -> Result<(), String> {
-    if let Ok(session_path) = active_session_path() {
+    if let Some(session_path) = crate::plugin::session::optional_active_session_path()? {
         let config: RemoteSessionConfig = read_json_file(&session_path)?;
         crate::plugin::sidebar_config::set_ports_row(&config, true)?;
         println!("Local sidebar saved; reload config in Herdr's menu");
@@ -834,6 +868,22 @@ mod lifecycle_tests {
         reconcile_forward_requests, workspace_create_arguments, workspace_port_tokens,
         DashboardMarker, DashboardOperations,
     };
+
+    #[cfg(unix)]
+    #[test]
+    fn foreground_probe_settles_new_processes_without_scanning_idle_panes_forever() {
+        let mut probe = super::ForegroundProbe::default();
+        let now = std::time::Instant::now();
+        let shell = vec![("w1:p1".into(), "shell-pid-1".into())];
+        assert!(probe.observe(shell.clone(), now));
+        assert!(probe.observe(shell.clone(), now + std::time::Duration::from_secs(2)));
+        assert!(!probe.observe(shell, now + std::time::Duration::from_secs(7)));
+        let server = vec![("w1:p1".into(), "node-pid-2".into())];
+        assert!(probe.observe(server.clone(), now + std::time::Duration::from_secs(8)));
+        assert!(probe.observe(server.clone(), now + std::time::Duration::from_secs(12)));
+        assert!(!probe.observe(server, now + std::time::Duration::from_secs(15)));
+        assert!(probe.observe(Vec::new(), now + std::time::Duration::from_secs(16)));
+    }
 
     struct TestDirectory(PathBuf);
 
