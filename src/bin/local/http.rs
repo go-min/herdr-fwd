@@ -13,6 +13,7 @@ const MAX_BODY_SIZE: usize = 64 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub(crate) struct Server(TcpListener);
+
 impl Server {
     pub(crate) fn from_listener(listener: TcpListener) -> io::Result<Self> {
         listener.set_nonblocking(true)?;
@@ -41,7 +42,7 @@ impl Server {
     }
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Method {
     Get,
     Post,
@@ -54,14 +55,19 @@ pub(crate) struct Request {
     method: Method,
     path: String,
     headers: Vec<(String, String)>,
-    pub(crate) body: Vec<u8>,
+    body: Vec<u8>,
 }
 
 impl Request {
     pub(crate) fn read(mut stream: TcpStream, stop: &AtomicBool) -> Result<Self, String> {
         let parsed = read_parts(&mut stream, stop, Instant::now() + REQUEST_TIMEOUT);
         match parsed {
-            Ok((method, path, headers, body)) => Ok(Self {
+            Ok(ParsedRequest {
+                method,
+                path,
+                headers,
+                body,
+            }) => Ok(Self {
                 stream,
                 method,
                 path,
@@ -80,29 +86,43 @@ impl Request {
             }
         }
     }
-    pub(crate) fn method(&self) -> &Method {
-        &self.method
+
+    pub(crate) fn method(&self) -> Method {
+        self.method
     }
+
+    pub(crate) fn body(&self) -> &[u8] {
+        &self.body
+    }
+
     pub(crate) fn url(&self) -> &str {
         &self.path
     }
+
     pub(crate) fn header(&self, name: &str) -> Option<&str> {
         self.headers
             .iter()
             .find(|(key, _)| key.eq_ignore_ascii_case(name))
             .map(|(_, value)| value.as_str())
     }
+
     pub(crate) fn respond(mut self, status: u16, body: &str) -> io::Result<()> {
         respond(&mut self.stream, status, body)
     }
 }
 
-type RequestParts = (Method, String, Vec<(String, String)>, Vec<u8>);
+struct ParsedRequest {
+    method: Method,
+    path: String,
+    headers: Vec<(String, String)>,
+    body: Vec<u8>,
+}
+
 fn read_parts(
     stream: &mut TcpStream,
     stop: &AtomicBool,
     deadline: Instant,
-) -> Result<RequestParts, String> {
+) -> Result<ParsedRequest, String> {
     let mut bytes = Vec::new();
     let header_end = loop {
         if let Some(index) = bytes.windows(4).position(|part| part == b"\r\n\r\n") {
@@ -203,12 +223,12 @@ fn read_parts(
     if stop.load(Ordering::SeqCst) {
         return Err("companion is stopping".into());
     }
-    Ok((
+    Ok(ParsedRequest {
         method,
         path,
         headers,
-        bytes[header_end..header_end + length].to_vec(),
-    ))
+        body: bytes[header_end..header_end + length].to_vec(),
+    })
 }
 
 fn read_more(
@@ -250,7 +270,8 @@ pub(crate) fn respond(stream: &mut TcpStream, status: u16, body: &str) -> io::Re
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn parse(raw: &[u8], timeout: Duration) -> Result<RequestParts, String> {
+
+    fn parse(raw: &[u8], timeout: Duration) -> Result<ParsedRequest, String> {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
         let (mut server, _) = listener.accept().unwrap();
@@ -264,6 +285,7 @@ mod tests {
             Instant::now() + timeout,
         )
     }
+
     #[test]
     fn rejects_ambiguous_and_oversized_framing() {
         for headers in [
@@ -281,6 +303,7 @@ mod tests {
             .is_err());
         }
     }
+
     #[test]
     fn incomplete_headers_and_body_obey_absolute_deadline() {
         for raw in [
@@ -293,12 +316,19 @@ mod tests {
             assert!(started.elapsed() < Duration::from_secs(1));
         }
     }
+
     #[test]
     fn parses_only_declared_body_without_accepting_a_second_request() {
-        let (method,path,headers,body)=parse(b"POST /v1/heartbeat HTTP/1.1\r\nauthorization: Bearer test\r\nContent-Length: 2\r\n\r\n{}GET / HTTP/1.1\r\n\r\n",Duration::from_secs(1)).unwrap();
-        assert!(method == Method::Post);
-        assert_eq!(path, "/v1/heartbeat");
-        assert_eq!(headers[0].1, "Bearer test");
-        assert_eq!(body, b"{}");
+        let raw = concat!(
+            "POST /v1/heartbeat HTTP/1.1\r\n",
+            "authorization: Bearer test\r\n",
+            "Content-Length: 2\r\n\r\n",
+            "{}GET / HTTP/1.1\r\n\r\n",
+        );
+        let request = parse(raw.as_bytes(), Duration::from_secs(1)).unwrap();
+        assert_eq!(request.method, Method::Post);
+        assert_eq!(request.path, "/v1/heartbeat");
+        assert_eq!(request.headers[0].1, "Bearer test");
+        assert_eq!(request.body, b"{}");
     }
 }

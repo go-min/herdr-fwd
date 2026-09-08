@@ -19,9 +19,6 @@ use crate::plugin::{
     },
 };
 
-#[path = "copy.rs"]
-mod copy;
-
 #[cfg(test)]
 pub(crate) fn handle_dashboard_key(
     key: KeyEvent,
@@ -605,11 +602,7 @@ fn set_message(state: &mut DashboardState, result: Result<(), String>, success: 
     match result {
         Ok(()) => state.show_message(success, false),
         Err(error) => state.show_message(
-            copy::format_actionable_error(
-                "Action failed.",
-                &error,
-                Some("Press r to retry or h for settings."),
-            ),
+            format!("Action failed.\n{error}\n\nPress r to retry or h for settings."),
             true,
         ),
     }

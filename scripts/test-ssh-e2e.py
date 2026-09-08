@@ -177,6 +177,12 @@ os.execv({ssh!r},[{ssh!r},'-F',{str(root/'ssh_config')!r}]+args)
                     return value
             return None
 
+        def remote_session_files():
+            return [
+                path for path in remote_sessions.glob("session-*.json")
+                if not path.name.endswith(".dashboard.json")
+            ]
+
         def body(local_port):
             with urllib.request.urlopen(f"http://127.0.0.1:{local_port}", timeout=2) as response:
                 return response.read() == b"hfwd-ssh-e2e"
@@ -238,11 +244,11 @@ time.sleep(2)
             print("PASS: forwarding dashboard survives a 12-second SSH outage", flush=True)
             peer = start_client("--no-auto-detect")
             eventually(lambda: state(peer))
-            eventually(lambda: len([path for path in remote_sessions.glob("session-*.json") if not path.name.endswith(".dashboard.json")]) == 2)
+            eventually(lambda: len(remote_session_files()) == 2)
             ambiguous = subprocess.run([ssh, "-F", str(root / "ssh_config"), alias, f'HERDR_SESSION={shlex.quote(session)} {shlex.quote(str(plugin))} open-dashboard-popup'], capture_output=True, text=True, timeout=10)
             assert ambiguous.returncode != 0 and "2 forwarding sessions" in ambiguous.stderr, ambiguous.stderr
             stop(peer)
-            eventually(lambda: len([path for path in remote_sessions.glob("session-*.json") if not path.name.endswith(".dashboard.json")]) == 1)
+            eventually(lambda: len(remote_session_files()) == 1)
             assert body(recovered["localPort"])
             print("PASS: ambiguous dashboard rejected; peer disconnect leaves other tunnels alive", flush=True)
             api(child, f'/v1/forwards/{paused["id"]}/toggle', {"enabled": True})

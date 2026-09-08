@@ -54,11 +54,9 @@ help: ## General|Show the available commands
 
 fmt: ## Core|Format Rust sources
 	$(CARGO) fmt --all
-	rustfmt --edition 2021 src/bin/local/*.rs src/bin/plugin/*.rs
 
 fmt-check:
 	$(CARGO) fmt --all -- --check
-	rustfmt --edition 2021 --check src/bin/local/*.rs src/bin/plugin/*.rs
 
 lint:
 	$(CARGO) clippy --locked --all-targets --all-features -- -D warnings

@@ -1,9 +1,10 @@
 # Architecture
 
-The project uses Rust with small, focused dependencies for typed JSON,
-loopback HTTP serving, signal handling, and watcher locking. Private temporary
-directories are implemented with the standard library and OS randomness,
-avoiding a platform-heavy transient dependency graph. Crossterm provides
+The project uses Rust with focused dependencies for typed JSON, TOML edits,
+signal handling, file locking, and terminal interaction. The loopback HTTP
+server uses standard-library sockets so request deadlines and shutdown remain
+under the companion's control. Private temporary directories use the standard
+library and OS randomness. Crossterm provides
 portable raw keyboard input, alternate-screen cleanup, and ANSI-palette
 styling for the remote dashboard. It builds one
 local wrapper/companion binary and one remote watcher binary. Herdr remains
@@ -11,13 +12,13 @@ unchanged.
 
 Source code is split by runtime responsibility. The reusable library keeps
 authentication, display sanitization, API models, Herdr configuration edits,
-and the forward registry
-separate. The local binary is assembled from SSH transport, companion HTTP
+and the forward registry separate. The local binary is assembled from SSH transport, companion HTTP
 handling, session CLI/orchestration, platform support, and management-command
 units. The remote binary similarly separates lifecycle discovery, dashboard
 input and rendering, notifications, RPC, Herdr adaptation, and session-file
 handling. This keeps protocol/state logic testable without coupling it to
-either CLI.
+either CLI. Companion tests live in `src/bin/local/companion/tests.rs`, sharing
+fixtures for HTTP, persistence, concurrency, and shutdown checks.
 
 ```text
 local wrapper

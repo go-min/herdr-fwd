@@ -1,4 +1,8 @@
 /target/
 /dist/
 .lima/
-.installed-by-herdr-fwd-wrapper
+
+# Local Python and macOS metadata
+__pycache__/
+*.py[cod]
+.DS_Store
