@@ -21,7 +21,7 @@ demo session afterward.
 
 ## Requirements
 
-- Herdr 0.8.x on every machine that runs the plugin;
+- Herdr 0.9.x on both the local connecting machine and remote plugin host;
 - macOS or Linux;
 - `ps` plus `lsof` on macOS, or `ps` plus `lsof`/`ss` on Linux;
 - `git`, `curl`, `tar`, and `sha256sum` or `shasum` for direct plugin install;
@@ -206,6 +206,11 @@ Automatic forwards are grouped by Space, tab, pane, and process identity.
 Duplicate Space or tab names remain separate. Each process shows its PID, and
 each mapping shows server start time, tunnel-open time, and live or paused
 state. Manual mappings use the same visual language in their own section.
+
+In Herdr 0.9, sidebar layout and notification delivery belong to the local
+client. Dashboard settings (`h`) update that machine through `hfwd`; apply them
+with **reload config** in Herdr's menu, or detach and reconnect. The popup
+shortcut remains in the remote configuration and uses `--remote-keybindings server`.
 
 The main actions are:
 

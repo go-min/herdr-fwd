@@ -33,8 +33,8 @@ case "$session" in
   *[!A-Za-z0-9-]*|'') printf 'Overview demo has invalid session name: %s\n' "$session" >&2; exit 1 ;;
 esac
 
-"$local_herdr" --version | grep -Fx 'herdr 0.8.0' >/dev/null || {
-  printf 'Overview demo needs Herdr 0.8.0; set HERDR_FWD_DEMO_HERDR if it is not on PATH\n' >&2
+"$local_herdr" --version | grep -Fx 'herdr 0.9.0' >/dev/null || {
+  printf 'Overview demo needs Herdr 0.9.0; set HERDR_FWD_DEMO_HERDR if it is not on PATH\n' >&2
   exit 1
 }
 
@@ -114,5 +114,8 @@ start_server "$next_pane" next 4000
 ) &
 dashboard_action_pid=$!
 
+printf '%s\n' "$config" >"$demo_root/local-herdr.toml"
+
+HERDR_CONFIG_PATH="$demo_root/local-herdr.toml" \
 PATH="$(dirname "$local_herdr"):$PATH" \
   "$repo_root/target/release/hfwd" "$target" -- --session "$session" --handoff --remote-keybindings server

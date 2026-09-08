@@ -193,10 +193,10 @@ impl DashboardFrame {
 pub(crate) fn dashboard(session_path: &Path) -> Result<(), String> {
     let _terminal = DashboardTerminal::enter()?;
     let mut state = DashboardState::default();
-    let palette = DashboardPalette::from_environment();
     let mut config: RemoteSessionConfig = read_json_file(session_path)?;
     config.validate()?;
     validate_current_herdr_session(&config)?;
+    let palette = DashboardPalette::from_session(&config);
     let mut forwards = match list_forwards(&config) {
         Ok(forwards) => forwards,
         Err(error) => {

@@ -400,6 +400,40 @@ fn handle_request(mut request: Request, state: &Arc<CompanionState<impl Ssh>>) {
         return;
     }
     match (method, path.as_str()) {
+        (Method::Get, "/v1/settings/local") => {
+            match herdr_fwd::herdr_config::dashboard_setup_status() {
+                Ok(status) => respond_json(request, 200, &status),
+                Err(error) => respond_error(request, 500, &error),
+            }
+        }
+        (Method::Post, "/v1/settings/sidebar") => {
+            let payload = match read_json::<ToggleRequest>(&mut request) {
+                Ok(payload) => payload,
+                Err(error) => {
+                    respond_error(request, 400, &error);
+                    return;
+                }
+            };
+            match herdr_fwd::herdr_config::set_ports_row(payload.enabled, || {
+                let output = std::process::Command::new("herdr")
+                    .arg("--default-config")
+                    .output()
+                    .map_err(|error| error.to_string())?;
+                if !output.status.success() {
+                    return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+                }
+                String::from_utf8(output.stdout).map_err(|error| error.to_string())
+            }) {
+                Ok(status) => respond_json(request, 200, &status),
+                Err(error) => respond_error(request, 500, &error),
+            }
+        }
+        (Method::Post, "/v1/settings/notifications") => {
+            match herdr_fwd::herdr_config::enable_herdr_notifications() {
+                Ok(status) => respond_json(request, 200, &status),
+                Err(error) => respond_error(request, 500, &error),
+            }
+        }
         (Method::Post, "/v1/heartbeat") => {
             if let Ok(mut heartbeat) = state.last_heartbeat.lock() {
                 *heartbeat = Some(Instant::now());
@@ -678,6 +712,110 @@ mod companion_tests {
         let mut response = String::new();
         stream.read_to_string(&mut response).unwrap();
         response
+    }
+
+    #[test]
+    fn local_settings_require_auth_preserve_config_and_serialize_writes() {
+        // No other hfwd test changes or reads HERDR_CONFIG_PATH. Restore it even
+        // on assertion failure so this test never leaves a test config selected.
+        struct RestoreConfig(Option<std::ffi::OsString>);
+        impl Drop for RestoreConfig {
+            fn drop(&mut self) {
+                match &self.0 {
+                    Some(path) => env::set_var("HERDR_CONFIG_PATH", path),
+                    None => env::remove_var("HERDR_CONFIG_PATH"),
+                }
+            }
+        }
+        let temporary = RuntimeDirectory::create("hfwd-local-settings-").unwrap();
+        let config_path = temporary.path().join("client.toml");
+        let original = "# keep client settings\n[theme]\nname = \"catppuccin-latte\"\n[ui.sidebar.spaces]\nrows = [[\"workspace\"]]\n[ui.toast]\ndelivery = \"off\"\n";
+        std::fs::write(&config_path, original).unwrap();
+        let _restore = RestoreConfig(env::var_os("HERDR_CONFIG_PATH"));
+        env::set_var("HERDR_CONFIG_PATH", &config_path);
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = Server::from_listener(listener, None).unwrap();
+        let token = "ab".repeat(32);
+        let state = Arc::new(CompanionState {
+            session_id: "0123456789abcdef01234567".into(),
+            target: "unused".into(),
+            companion_url: format!("http://{address}"),
+            token: token.clone(),
+            wrapper_pid: std::process::id(),
+            registry: Mutex::new(Registry::new(FakeSsh::default())),
+            state_path: temporary.path().join("session.json"),
+            manual_path: temporary.path().join("manual.json"),
+            paused_path: temporary.path().join("paused.json"),
+            last_heartbeat: Mutex::new(None),
+            open_new: false,
+        });
+        let stop = Arc::new(AtomicBool::new(false));
+        let server_thread = spawn_server(server, state.clone(), stop.clone());
+        let base = &state.companion_url;
+        for (method, path) in [
+            ("GET", "/v1/settings/local"),
+            ("POST", "/v1/settings/sidebar"),
+            ("POST", "/v1/settings/notifications"),
+        ] {
+            let response = http_request(base, "wrong-token", method, path, None).unwrap_err();
+            assert!(response.starts_with("HTTP/1.1 401"));
+        }
+        assert_eq!(std::fs::read_to_string(&config_path).unwrap(), original);
+        let status = http_request(base, &token, "GET", "/v1/settings/local", None).unwrap();
+        assert!(status.contains("catppuccin-latte"));
+        assert!(status.contains("\"sidebar_ports_enabled\":false"));
+        let invalid = http_request(
+            base,
+            &token,
+            "POST",
+            "/v1/settings/sidebar",
+            Some(r#"{"enabled":true,"path":"/arbitrary/file"}"#),
+        )
+        .unwrap_err();
+        assert!(invalid.starts_with("HTTP/1.1 400"));
+        assert_eq!(std::fs::read_to_string(&config_path).unwrap(), original);
+        std::thread::scope(|scope| {
+            let sidebar = scope.spawn(|| {
+                http_request(
+                    base,
+                    &token,
+                    "POST",
+                    "/v1/settings/sidebar",
+                    Some(r#"{"enabled":true}"#),
+                )
+                .unwrap()
+            });
+            let notifications = scope.spawn(|| {
+                http_request(base, &token, "POST", "/v1/settings/notifications", None).unwrap()
+            });
+            assert!(sidebar.join().unwrap().starts_with("HTTP/1.1 200"));
+            assert!(notifications.join().unwrap().starts_with("HTTP/1.1 200"));
+        });
+        let updated = std::fs::read_to_string(&config_path).unwrap();
+        assert!(updated.contains("# keep client settings"));
+        assert!(updated.contains("catppuccin-latte"));
+        assert!(updated.contains("$port_forward_status"));
+        assert!(updated.contains("delivery = \"herdr\""));
+        assert!(!updated.contains("keys.command"));
+        assert!(config_path.with_extension("toml.herdr-fwd.bak").exists());
+        let disabled = http_request(
+            base,
+            &token,
+            "POST",
+            "/v1/settings/sidebar",
+            Some(r#"{"enabled":false}"#),
+        )
+        .unwrap();
+        assert!(disabled.contains("\"sidebar_ports_enabled\":false"));
+        let broken = "[invalid toml";
+        std::fs::write(&config_path, broken).unwrap();
+        let response =
+            http_request(base, &token, "POST", "/v1/settings/notifications", None).unwrap_err();
+        assert!(response.starts_with("HTTP/1.1 500"));
+        assert_eq!(std::fs::read_to_string(&config_path).unwrap(), broken);
+        stop.store(true, Ordering::SeqCst);
+        server_thread.join().unwrap();
     }
 
     #[test]

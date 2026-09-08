@@ -15,7 +15,8 @@ use crate::plugin::dashboard_terminal::{
     RemoveForwardConfirmation,
 };
 use crate::plugin::herdr::PaneLocation;
-use crate::plugin::sidebar_config::configured_theme_name;
+use crate::plugin::rpc::api_request;
+use herdr_fwd::herdr_config::DashboardSetupStatus;
 
 pub(crate) fn render_dashboard(
     config: &RemoteSessionConfig,
@@ -798,8 +799,11 @@ pub(crate) struct DashboardPalette {
 }
 
 impl DashboardPalette {
-    pub(crate) fn from_environment() -> Self {
-        let theme_name = configured_theme_name().ok().flatten();
+    pub(crate) fn from_session(config: &RemoteSessionConfig) -> Self {
+        let theme_name =
+            api_request::<DashboardSetupStatus>(config, "GET", "/v1/settings/local", None)
+                .ok()
+                .and_then(|status| status.theme_name);
         Self::from_theme_and_colorfgbg(
             theme_name.as_deref(),
             std::env::var("COLORFGBG").ok().as_deref(),

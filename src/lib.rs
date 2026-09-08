@@ -1,6 +1,7 @@
 pub mod atomic;
 mod auth;
 pub mod detect;
+pub mod herdr_config;
 mod model;
 pub mod registry;
 pub mod shell;

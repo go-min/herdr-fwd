@@ -279,3 +279,21 @@ ssh lima-herdr-test 'export PATH="$HOME/.local/bin:$PATH"; herdr plugin list'
 The wrapper target must be `lima-herdr-test`, not the VM name `herdr-test`.
 Lima's generated SSH alias includes the correct guest user, key, and local SSH
 port.
+
+## Herdr 0.9 regression checks
+
+Use Herdr 0.9.0 on the connecting machine and the fixture host. Verify that
+0.8.x and 0.10.x are rejected by `hfwd doctor` before starting a connection.
+
+In the remote dashboard, press `h`, toggle port status, and enable Herdr
+notifications. Confirm only the connecting machine's UI config changes, then
+select **reload config** in Herdr's menu and check the status row. A remote
+server reload alone must not be treated as applying client presentation changes.
+Check that the popup shortcut still edits the remote server's bindings.
+
+Start a listener immediately after attaching and after a watcher event-stream
+reconnect. Check discovery after pane lifecycle/metadata events and through the
+15-second fallback when no such event is emitted: `pane.updated` is not a raw
+output stream. Test popup open/close, split dashboards, source-pane focus, and removal
+of all forwards when the source process exits. Public source-pane focus currently
+affects all Herdr clients attached to the server; it is not client-scoped.

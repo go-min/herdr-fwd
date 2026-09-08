@@ -51,7 +51,9 @@ that role is selected:
 - when `hfwd` installed this plugin during a remote connection, a later
   local run explains that origin and adds **Uninstall plugin**; and
 - every role offers **Enable port status**, which adds the standalone
-  `$port_forward_status` Space sidebar row and reloads the Herdr configuration;
+  `$port_forward_status` Space sidebar row on this host. Apply it with
+  **reload config** in Herdr's menu. For a separate connecting machine, use
+  the dashboard settings during an `hfwd` connection;
   and
 - **Enable dashboard shortcut**, which adds server-side `prefix+shift+f` for
   the dashboard popup. Attach with `--remote-keybindings server` to use it.
@@ -184,17 +186,23 @@ restart refreshes the server timestamp even when its display label is unchanged.
 Press `h` to configure:
 
 - **After forwarding** — chooses `SPACE`, `POPUP`, or `NOTHING` as the default;
-- **Port-forward status** — adds the standalone `$port_forward_status` Space
-  sidebar row; and
-- **Notifications inside Herdr** — safely sets Herdr toast delivery to `herdr`;
-  and
+- **Port-forward status** — toggles the standalone `$port_forward_status` Space
+  sidebar row in the connecting machine's local Herdr configuration;
+- **Notifications inside Herdr** — sets local client toast delivery to `herdr`;
 - **Popup shortcut** — adds `prefix+shift+f` for the dashboard popup to the
   remote Herdr config. Start the attach with `--remote-keybindings server` to
   use it.
 
-Configuration edits parse and validate the existing TOML, preserve unrelated
-rows and toast settings, and create an atomic backup. Invalid or incompatible
-configuration is left untouched.
+Sidebar and notification changes travel over the authenticated companion
+channel to the connecting machine. Select **reload config** in Herdr's menu
+(or detach and reconnect) to apply them; `herdr server reload-config` only
+reloads server configuration. Existing sidebar settings on the remote host are
+not copied automatically. The dashboard palette uses the local client's theme.
+
+Configuration edits parse and validate existing TOML, preserve unrelated rows
+and toast settings, back up the previous contents, and replace the file
+atomically. A separate file lock serializes simultaneous companion writes.
+Invalid or incompatible configuration is left untouched.
 
 With the status row enabled, the forwarding Space shows active and paused
 counts. Source Spaces receive compact mapping metadata such as `→5173` or

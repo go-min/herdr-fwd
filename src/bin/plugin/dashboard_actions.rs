@@ -110,7 +110,7 @@ pub(crate) fn handle_dashboard_key_with_session_path(
             state.message = None;
         }
         KeyCode::Char(_) if is_shortcut(key, 'h') => {
-            match (load_preferences(), dashboard_setup_status()) {
+            match (load_preferences(), dashboard_setup_status(config)) {
                 (Ok(preferences), Ok(status)) => {
                     state.form = Some(DashboardForm::Integration(IntegrationMenu {
                         selected: 0,
@@ -344,31 +344,21 @@ fn handle_integration_key(
         }
         KeyCode::Enter | KeyCode::Char(' ') => match form.selected {
             0 => update_after_forward(config, form, state, session_path, 1),
-            1 => match set_ports_row(!form.sidebar_ports_enabled) {
-                Ok(status) => match herdr_output(&["server", "reload-config"]) {
-                    Ok(_) => {
-                        form.sidebar_ports_enabled = status.sidebar_ports_enabled;
-                        state.show_message(
-                            if form.sidebar_ports_enabled {
-                                "Sidebar port status added"
-                            } else {
-                                "Sidebar port status removed"
-                            },
-                            false,
-                        );
-                    }
-                    Err(error) => state.show_message(error, true),
-                },
+            1 => match set_ports_row(config, !form.sidebar_ports_enabled) {
+                Ok(status) => {
+                    form.sidebar_ports_enabled = status.sidebar_ports_enabled;
+                    state.show_message("Local sidebar saved; reload config in Herdr's menu", false);
+                }
                 Err(error) => state.show_message(error, true),
             },
-            2 => match enable_herdr_notifications() {
-                Ok(status) => match herdr_output(&["server", "reload-config"]) {
-                    Ok(_) => {
-                        form.toast_delivery = status.toast_delivery.clone();
-                        state.show_message("Notifications inside Herdr configured", false);
-                    }
-                    Err(error) => state.show_message(error, true),
-                },
+            2 => match enable_herdr_notifications(config) {
+                Ok(status) => {
+                    form.toast_delivery = status.toast_delivery;
+                    state.show_message(
+                        "Local notifications saved; reload config in Herdr's menu",
+                        false,
+                    );
+                }
                 Err(error) => state.show_message(error, true),
             },
             3 => match enable_dashboard_popup_shortcut() {

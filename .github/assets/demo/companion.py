@@ -18,6 +18,12 @@ def initial_forwards():
 
 
 FORWARDS = initial_forwards()
+LOCAL_SETTINGS = {
+    "sidebar_ports_enabled": False,
+    "toast_delivery": None,
+    "popup_shortcut_enabled": False,
+    "theme_name": None,
+}
 
 
 def forwards_with_runtime_panes(pane_map_path):
@@ -40,12 +46,32 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
+        if self.path == "/v1/settings/local":
+            self.send_json(LOCAL_SETTINGS)
+            return
         if self.path == "/v1/forwards":
             self.send_json(forwards_with_runtime_panes(args.pane_map))
             return
         self.send_error(404)
 
     def do_POST(self):
+        if self.path == "/v1/settings/notifications":
+            LOCAL_SETTINGS["toast_delivery"] = "herdr"
+            self.send_json(LOCAL_SETTINGS)
+            return
+        if self.path == "/v1/settings/sidebar":
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                payload = json.loads(self.rfile.read(length))
+                enabled = payload["enabled"]
+                if not isinstance(enabled, bool):
+                    raise ValueError("expected boolean")
+            except (json.JSONDecodeError, KeyError, ValueError):
+                self.send_error(400, "expected a JSON enabled boolean")
+                return
+            LOCAL_SETTINGS["sidebar_ports_enabled"] = enabled
+            self.send_json(LOCAL_SETTINGS)
+            return
         prefix = "/v1/forwards/"
         suffix = "/toggle"
         if not self.path.startswith(prefix) or not self.path.endswith(suffix):

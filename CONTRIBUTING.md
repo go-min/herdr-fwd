@@ -10,7 +10,7 @@ inside this repository; Herdr core changes require a separate upstream proposal.
 ## Development requirements
 
 - Rust stable with the declared Rust 1.82 MSRV available for compatibility;
-- OpenSSH, Python 3.11+, and Herdr 0.8.0+;
+- OpenSSH, Python 3.11+, and Herdr 0.9.0+;
 - `lsof`, `curl`, `tar`, and a SHA-256 utility;
 - `shellcheck` for script validation; and
 - `cargo-deny` for dependency policy checks.

@@ -278,12 +278,13 @@ pub(crate) fn welcome() -> Result<(), String> {
             KeyCode::Enter => {
                 if let Some(role) = role {
                     match welcome_actions(role, wrapper_installed, installed_by_wrapper)[selected] {
-                        WelcomeAction::EnableSidebarStatus => match enable_ports_row()
-                            .and_then(|_| herdr_output(&["server", "reload-config"]).map(|_| ()))
-                        {
-                            Ok(()) => {
-                                message =
-                                    Some(("Port-forward status enabled in Herdr.".into(), false));
+                        WelcomeAction::EnableSidebarStatus => match enable_ports_row() {
+                            Ok(_) => {
+                                message = Some((
+                                    "Sidebar saved on this host; reload config in Herdr's menu."
+                                        .into(),
+                                    false,
+                                ));
                             }
                             Err(error) => message = Some((error, true)),
                         },

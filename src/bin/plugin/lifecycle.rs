@@ -167,8 +167,6 @@ fn watch_loop() -> Result<(), String> {
 
     let mut failures = HashMap::new();
     let mut empty_scans = 0;
-    #[cfg(unix)]
-    let mut events = None;
 
     // Session files are created by the wrapper, not by Herdr, so use a short
     // retry until the first one appears. Once it does, events drive expensive
@@ -189,6 +187,10 @@ fn watch_loop() -> Result<(), String> {
     }
 
     let _heartbeat = HeartbeatWorker::start();
+    // Herdr 0.9 subscriptions are live-only. Queue events before taking the
+    // snapshot so a listener change during discovery is not lost.
+    #[cfg(unix)]
+    let mut events = crate::plugin::herdr::EventSubscriber::connect().ok();
     scan_once()?;
     let mut last_reconciliation = Instant::now();
     loop {
@@ -196,6 +198,10 @@ fn watch_loop() -> Result<(), String> {
         let event_received = {
             if events.is_none() {
                 events = crate::plugin::herdr::EventSubscriber::connect().ok();
+                if events.is_some() {
+                    scan_once()?;
+                    last_reconciliation = Instant::now();
+                }
             }
             match events.as_mut() {
                 Some(subscriber) => match subscriber.wait(HEARTBEAT_INTERVAL) {
@@ -760,16 +766,24 @@ fn dashboard_current() -> Result<(), String> {
 }
 
 fn enable_sidebar_status() -> Result<(), String> {
+    if let Ok(session_path) = active_session_path() {
+        let config: RemoteSessionConfig = read_json_file(&session_path)?;
+        crate::plugin::sidebar_config::set_ports_row(&config, true)?;
+        println!("Local sidebar saved; reload config in Herdr's menu");
+        return Ok(());
+    }
     let path = enable_ports_row()?;
-    herdr_output(&["server", "reload-config"])?;
     let _ = herdr_output(&[
         "notification",
         "show",
         "Port status enabled",
         "--body",
-        "Space sidebar now shows forwarded ports",
+        "Sidebar saved; reload config in Herdr's menu",
     ]);
-    println!("Enabled $port_forward_status in {}", path.display());
+    println!(
+        "Sidebar saved in {}; reload config in Herdr's menu",
+        path.display()
+    );
     Ok(())
 }
 

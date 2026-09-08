@@ -1,7 +1,7 @@
 id = "herdr.fwd"
 name = "Herdr Fwd"
 version = "0.1.5"
-min_herdr_version = "0.8.0"
+min_herdr_version = "0.9.0"
 description = "Discover localhost dev servers in remote Herdr panes and request local SSH forwards"
 platforms = ["linux", "macos"]
 

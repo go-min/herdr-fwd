@@ -5,6 +5,22 @@ Versioning.
 
 ## [Unreleased]
 
+### Changed
+
+- Require Herdr 0.9.x on both the connecting and hosting machines.
+- Apply dashboard sidebar and notification settings to the connecting client's
+  configuration through the authenticated companion. Keep plugin shortcuts in
+  the remote server configuration. Use Herdr's menu to reload local UI settings.
+- Select dashboard colors from the connecting client's configured theme.
+- Update the Lima and Overview demo fixtures to Herdr 0.9.0.
+
+### Fixed
+
+- Subscribe before the initial discovery snapshot and rescan immediately after
+  reconnecting the event stream, matching Herdr 0.9's live-only subscriptions.
+- Serialize configuration writes across companions to preserve simultaneous
+  sidebar and notification changes.
+
 ## [0.1.5] - 2026-08-05
 
 ### Changed

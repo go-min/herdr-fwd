@@ -10,7 +10,8 @@ local wrapper/companion binary and one remote watcher binary. Herdr remains
 unchanged.
 
 Source code is split by runtime responsibility. The reusable library keeps
-authentication, display sanitization, API models, and the forward registry
+authentication, display sanitization, API models, Herdr configuration edits,
+and the forward registry
 separate. The local binary is assembled from SSH transport, companion HTTP
 handling, session CLI/orchestration, platform support, and management-command
 units. The remote binary similarly separates lifecycle discovery, dashboard
@@ -117,3 +118,14 @@ The RPC contract carries an explicit protocol version and Herdr session scope,
 and rejects incompatible or cross-session files. Requests, responses, metadata fields, and the registry are
 bounded. Untrusted process labels and errors are stripped of terminal control
 sequences before dashboard rendering.
+
+## Herdr 0.9 client configuration
+
+The remote dashboard reads local presentation settings with authenticated
+`GET /v1/settings/local`. `POST /v1/settings/sidebar` accepts only an `enabled`
+boolean; `POST /v1/settings/notifications` enables Herdr toast delivery. The
+companion chooses its own config path; requests cannot supply a path or an
+arbitrary configuration patch. Shared TOML transformations preserve unrelated
+settings, with a stable file lock and atomic replacement for concurrent writers.
+Plugin shortcut bindings remain server-side. Client presentation reload is
+performed from Herdr's menu, since the public server reload API is insufficient.

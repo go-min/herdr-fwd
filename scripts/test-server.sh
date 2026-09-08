@@ -70,7 +70,7 @@ provision() {
     if ! command -v deno >/dev/null 2>&1; then
       curl -fsSL https://deno.land/install.sh | DENO_INSTALL=\$HOME/.local sh
     fi
-    herdr_version=0.8.0
+    herdr_version=0.9.0
     herdr_asset=herdr-linux-aarch64
     herdr_sha256=f647ac66468d9efbc642fe534fb284468f0aea60641606fc008dfc0d82a3ca87
     case \$(uname -m) in

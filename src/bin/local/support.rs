@@ -255,9 +255,9 @@ pub(crate) fn require_herdr_compatibility(
         .split_whitespace()
         .find_map(parse_version)
         .ok_or_else(|| format!("could not parse {location} Herdr version: {version_output}"))?;
-    if !((0, 8, 0)..(0, 9, 0)).contains(&version) {
+    if !((0, 9, 0)..(0, 10, 0)).contains(&version) {
         Err(format!(
-            "{location} Herdr {}.{}.{} is unsupported; this release supports >=0.8.0 and <0.9.0",
+            "{location} Herdr {}.{}.{} is unsupported; this release supports >=0.9.0 and <0.10.0",
             version.0, version.1, version.2
         ))
     } else {
@@ -302,8 +302,11 @@ mod support_tests {
         assert_eq!(parse_version("0.8.0-beta.1"), Some((0, 8, 0)));
         assert!(require_herdr_compatibility("herdr 0.7.5", "test").is_err());
         assert!(require_herdr_compatibility("herdr 0.7.4", "test").is_err());
-        assert!(require_herdr_compatibility("herdr 0.8.0", "test").is_ok());
-        assert!(require_herdr_compatibility("herdr 0.9.0", "test").is_err());
+        assert!(require_herdr_compatibility("herdr 0.8.0", "test").is_err());
+        assert!(require_herdr_compatibility("herdr 0.9.0", "test").is_ok());
+        assert!(require_herdr_compatibility("herdr 0.9.12", "test").is_ok());
+        assert!(require_herdr_compatibility("herdr 0.10.0", "test").is_err());
+        assert!(require_herdr_compatibility("herdr 1.0.0", "test").is_err());
     }
 
     #[test]
