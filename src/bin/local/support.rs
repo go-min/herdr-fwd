@@ -154,7 +154,7 @@ pub(crate) fn require_local_herdr_compatibility() -> Result<(), String> {
     require_herdr_compatibility(&local_herdr_version()?, "local")
 }
 
-pub(crate) fn doctor(target: Option<&String>) -> Result<(), String> {
+pub(crate) fn doctor(target: Option<&String>, session: &str) -> Result<(), String> {
     require_ssh()?;
     let local_version = local_herdr_version()?;
     require_herdr_compatibility(&local_version, "local")?;
@@ -162,6 +162,16 @@ pub(crate) fn doctor(target: Option<&String>) -> Result<(), String> {
         "✓ OpenSSH available\n✓ Local Herdr compatible ({})",
         local_version.trim()
     );
+    let status = Command::new("herdr")
+        .args(["status", "server", "--json"])
+        .output()
+        .map_err(|error| format!("failed to inspect local Herdr server: {error}"))?;
+    if !status.status.success() {
+        return Err(String::from_utf8_lossy(&status.stderr).trim().into());
+    }
+    let status = serde_json::from_slice(&status.stdout)
+        .map_err(|error| format!("invalid local Herdr server status: {error}"))?;
+    println!("{}", server_diagnostic(&status, &local_version, "local")?);
     if let Some(target) = target {
         let temporary = RuntimeDirectory::create("herdr-fwd-doctor-")?;
         let client = SshClient {
@@ -189,6 +199,16 @@ pub(crate) fn doctor(target: Option<&String>) -> Result<(), String> {
             .split_once('\n')
             .ok_or_else(|| "remote Herdr did not return plugin status".to_string())?;
         require_herdr_compatibility(remote_version, "remote")?;
+        let server_status = client.remote_command(&format!(
+            "export PATH=\"$HOME/.local/bin:$HOME/.cargo/bin:/usr/local/bin:$PATH\"; herdr --session {} status server --json",
+            herdr_fwd::shell::quote(session)
+        ))?;
+        let server_status = serde_json::from_str(&server_status)
+            .map_err(|error| format!("invalid remote Herdr server status: {error}"))?;
+        println!(
+            "{}",
+            server_diagnostic(&server_status, remote_version, "remote")?
+        );
         let plugin_json: serde_json::Value = serde_json::from_str(plugin_json)
             .map_err(|error| format!("invalid remote plugin status: {error}"))?;
         let Some((enabled, version)) = plugin_status(&plugin_json) else {
@@ -211,6 +231,43 @@ pub(crate) fn doctor(target: Option<&String>) -> Result<(), String> {
         drop(master);
     }
     Ok(())
+}
+
+fn server_diagnostic(
+    status: &serde_json::Value,
+    binary_version: &str,
+    location: &str,
+) -> Result<String, String> {
+    match status.get("running").and_then(serde_json::Value::as_bool) {
+        Some(false) => return Ok(format!("· {location} Herdr server is not running")),
+        Some(true) => {}
+        None => {
+            return Err(format!(
+                "invalid {location} Herdr server status: missing running flag"
+            ))
+        }
+    }
+    let version = status
+        .get("version")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| format!("could not determine {location} Herdr server version"))?;
+    require_herdr_compatibility(version, &format!("{location} running server"))?;
+    let installed = binary_version
+        .split_whitespace()
+        .find(|value| parse_version(value).is_some())
+        .ok_or_else(|| format!("could not parse {location} installed Herdr version"))?;
+    if version != installed
+        || status
+            .get("restart_needed")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+    {
+        Ok(format!("! {location} Herdr server {version} differs from installed {installed} or needs a restart; restart the affected session when safe (stops its panes)"))
+    } else {
+        Ok(format!(
+            "✓ {location} running Herdr server compatible ({version})"
+        ))
+    }
 }
 
 fn local_herdr_version() -> Result<String, String> {
@@ -281,6 +338,34 @@ fn parse_version(value: &str) -> Option<(u64, u64, u64)> {
 
 #[cfg(test)]
 mod support_tests {
+    #[test]
+    fn doctor_checks_running_server_separately_from_installed_binary() {
+        let current = serde_json::json!({"status":"running", "running":true, "version":"0.9.3", "protocol":1, "restart_needed":false});
+        assert!(super::server_diagnostic(&current, "herdr 0.9.3", "local")
+            .unwrap()
+            .contains("0.9.3"));
+        let mut stale = current.clone();
+        stale["version"] = "0.9.0".into();
+        assert!(super::server_diagnostic(&stale, "herdr 0.9.3", "remote")
+            .unwrap()
+            .contains("differs"));
+        stale["version"] = "0.8.2".into();
+        assert!(super::server_diagnostic(&stale, "herdr 0.9.3", "remote").is_err());
+        assert!(super::server_diagnostic(
+            &serde_json::json!({"running":false}),
+            "herdr 0.9.3",
+            "local"
+        )
+        .unwrap()
+        .contains("not running"));
+        assert!(super::server_diagnostic(
+            &serde_json::json!({"running":true}),
+            "herdr 0.9.3",
+            "local"
+        )
+        .is_err());
+    }
+
     use super::{
         parse_version, plugin_status, require_herdr_compatibility, secure_random_hex,
         RuntimeDirectory,

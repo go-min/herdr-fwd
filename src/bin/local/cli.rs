@@ -68,13 +68,19 @@ fn run() -> Result<(), String> {
         Some("close") => return close_forward(arguments.get(1)),
         Some("close-all") => return close_all_forwards(),
         Some("forward") => return create_manual_forward(&arguments[1..]),
-        Some("doctor") => return doctor(arguments.get(1)),
+        Some("doctor") => {
+            if arguments.len() == 1 {
+                return doctor(None, "default");
+            }
+            let cli = connection_cli(&arguments[1..])?;
+            return doctor(Some(&cli.target), &remote_herdr_session_name(&cli));
+        }
         Some("hook") => return run_hook(&arguments[1..]),
         Some("remote") => return manage_remote(&arguments[1..]),
         _ => {}
     }
 
-    let cli = parse_cli(&arguments)?;
+    let cli = connection_cli(&arguments)?;
     require_ssh()?;
     require_local_herdr_compatibility()?;
     let stop_requested = Arc::new(AtomicBool::new(false));
@@ -272,13 +278,84 @@ fn parse_cli(arguments: &[String]) -> Result<Cli, String> {
     })
 }
 
+fn connection_cli(arguments: &[String]) -> Result<Cli, String> {
+    if arguments.first().map(String::as_str) != Some("--machine") {
+        return parse_cli(arguments);
+    }
+    let output = Command::new("herdr")
+        .args(["machine", "list", "--json"])
+        .output()
+        .map_err(|error| format!("failed to list saved machines: {error}"))?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().into());
+    }
+    let machines = serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("invalid saved machine list: {error}"))?;
+    parse_cli(&saved_machine_arguments(arguments, &machines)?)
+}
+
+fn saved_machine_arguments(
+    arguments: &[String],
+    machines: &serde_json::Value,
+) -> Result<Vec<String>, String> {
+    #[derive(serde::Deserialize)]
+    struct Machine {
+        id: String,
+        label: String,
+        target: String,
+        session: String,
+        enabled: bool,
+    }
+    let selector = arguments
+        .get(1)
+        .filter(|selector| !selector.is_empty())
+        .ok_or_else(|| "usage: hfwd --machine <label-or-id> [options]".to_string())?;
+    let machines: Vec<Machine> = serde_json::from_value(machines.clone())
+        .map_err(|error| format!("invalid saved machine list: {error}"))?;
+    let by_id = machines.iter().any(|machine| machine.id == *selector);
+    let mut matches = machines.iter().filter(|machine| {
+        if by_id {
+            machine.id == *selector
+        } else {
+            machine.label == *selector
+        }
+    });
+    let machine = matches
+        .next()
+        .ok_or_else(|| format!("saved machine not found: {selector}"))?;
+    if matches.next().is_some() {
+        return Err(format!(
+            "ambiguous saved machine label: {selector}; use its ID"
+        ));
+    }
+    if !machine.enabled {
+        return Err(format!("saved machine is disabled: {selector}"));
+    }
+    validate_ssh_target(&machine.target)?;
+    herdr_session_storage_key(&machine.session)?;
+    if arguments[2..].iter().any(|argument| {
+        ["--session", "--remote", "--machine"]
+            .iter()
+            .any(|flag| argument == flag || argument.starts_with(&format!("{flag}=")))
+    }) {
+        return Err("saved machines use their configured target and session; remove --session, --remote, and --machine overrides".into());
+    }
+    let mut expanded = vec![machine.target.clone()];
+    expanded.extend_from_slice(&arguments[2..]);
+    if !expanded.iter().any(|argument| argument == "--") {
+        expanded.push("--".into());
+    }
+    expanded.extend(["--session".into(), machine.session.clone()]);
+    Ok(expanded)
+}
+
 fn print_help() {
     println!(
         "hfwd {version}\n\n\
-Usage:\n  hfwd <target> [options] -- [herdr arguments]\n  \
+Usage:\n  hfwd <target> [options] -- [herdr arguments]\n  hfwd --machine <label-or-id> [options]\n  \
 hfwd <command> [arguments]\n\n\
 Session options:\n  --open                 Open each newly forwarded URL once\n  --verbose              Show session diagnostics (never the token)\n  --no-auto-detect       Disable pane-output discovery\n  --local-bind 127.0.0.1 Local bind (loopback is the only supported value)\n\n\
-Commands:\n  list                       List forwards in active local sessions\n  status                     Continuously refresh the forward list\n  {MANUAL_FORWARD_USAGE}\n                             Create a manual forward; start it first with hfwd <target>\n  close <id|local-port>      Close one forward\n  close-all                  Close every active forward\n  doctor [target]            Validate local and optional remote prerequisites\n  remote install <target>    Install and enable the managed remote plugin\n  remote update <target>     Reinstall the managed remote plugin from GitHub\n  remote status <target>     Show remote plugin registration state\n  remote uninstall <target>  Disable and remove the managed remote plugin\n  hook [zsh|bash|fish]       Print an interceptor for herdr --remote\n  hook install [shell]       Install it in the current shell config\n  help                        Show this help\n  version                     Show the wrapper version",
+Commands:\n  list                       List forwards in active local sessions\n  status                     Continuously refresh the forward list\n  {MANUAL_FORWARD_USAGE}\n                             Create a manual forward; start it first with hfwd <target>\n  close <id|local-port>      Close one forward\n  close-all                  Close every active forward\n  doctor [target]            Check binaries, running servers, SSH, and plugin\n  doctor --machine <id|label> Check the saved target and session\n  remote install <target>    Install and enable the managed remote plugin\n  remote update <target>     Reinstall the managed remote plugin from GitHub\n  remote status <target>     Show remote plugin registration state\n  remote uninstall <target>  Disable and remove the managed remote plugin\n  hook [zsh|bash|fish]       Print an interceptor for herdr --remote\n  hook install [shell]       Install it in the current shell config\n  help                        Show this help\n  version                     Show the wrapper version",
         version = env!("CARGO_PKG_VERSION")
     );
 }
@@ -459,6 +536,46 @@ fn terminate_child(child: &mut Child) {
 
 #[cfg(test)]
 mod cli_tests {
+    #[test]
+    fn saved_machine_uses_its_target_and_session_without_fallback() {
+        let machines = serde_json::json!([
+            {"id":"a", "label":"Build box", "target":"dev@build", "session":"review", "enabled":true, "selected":false},
+            {"id":"b", "label":"Disabled", "target":"other", "session":"default", "enabled":false, "selected":false}
+        ]);
+        let args = ["--machine".into(), "Build box".into(), "--open".into()];
+        let expanded = super::saved_machine_arguments(&args, &machines).unwrap();
+        let cli = super::parse_cli(&expanded).unwrap();
+        assert_eq!(cli.target, "dev@build");
+        assert_eq!(super::remote_herdr_session_name(&cli), "review");
+        assert!(cli.open);
+        for selector in ["missing", "b"] {
+            assert!(super::saved_machine_arguments(
+                &["--machine".into(), selector.into()],
+                &machines
+            )
+            .is_err());
+        }
+        assert!(super::saved_machine_arguments(
+            &[
+                "--machine".into(),
+                "a".into(),
+                "--".into(),
+                "--session=other".into()
+            ],
+            &machines
+        )
+        .is_err());
+        let mut duplicate = machines.clone();
+        duplicate.as_array_mut().unwrap().push(serde_json::json!({"id":"c", "label":"Build box", "target":"other", "session":"default", "enabled":true}));
+        assert!(super::saved_machine_arguments(&args, &duplicate).is_err());
+        assert!(
+            super::saved_machine_arguments(&["--machine".into(), "a".into()], &duplicate).is_ok()
+        );
+        let mut unsafe_target = machines.clone();
+        unsafe_target[0]["target"] = "-oProxyCommand=bad".into();
+        assert!(super::saved_machine_arguments(&args, &unsafe_target).is_err());
+    }
+
     use std::{
         fs,
         path::{Path, PathBuf},

@@ -1105,11 +1105,17 @@ mod lifecycle_tests {
         assert_eq!(
             workspace_port_tokens(
                 std::slice::from_ref(&automatic),
-                &[current_automatic, manual, paused],
+                &[current_automatic, manual, paused.clone()],
                 &map
             ),
             HashMap::from([("w1".to_string(), Some("5173→5174".to_string()))])
         );
+        for current in [vec![], vec![paused]] {
+            assert_eq!(
+                workspace_port_tokens(std::slice::from_ref(&automatic), &current, &map),
+                HashMap::from([("w1".to_string(), None)])
+            );
+        }
     }
 
     #[test]

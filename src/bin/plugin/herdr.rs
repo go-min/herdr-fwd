@@ -790,6 +790,12 @@ impl EventSubscriber {
         let socket = herdr_socket_path()?;
         let mut stream = UnixStream::connect(socket)
             .map_err(|error| format!("failed to connect to Herdr socket: {error}"))?;
+        stream
+            .set_read_timeout(Some(RECONCILIATION_COMMAND_TIMEOUT))
+            .map_err(|error| error.to_string())?;
+        stream
+            .set_write_timeout(Some(RECONCILIATION_COMMAND_TIMEOUT))
+            .map_err(|error| error.to_string())?;
         let request = serde_json::json!({
             "id": "herdr-fwd:watch",
             "method": "events.subscribe",
@@ -828,7 +834,17 @@ impl EventSubscriber {
         let mut event = String::new();
         match self.reader.read_line(&mut event) {
             Ok(0) => Err("Herdr event subscription closed".into()),
-            Ok(_) => Ok(!event.trim().is_empty()),
+            Ok(_) => {
+                if event.trim().is_empty() {
+                    return Ok(false);
+                }
+                let event: Value = serde_json::from_str(&event)
+                    .map_err(|error| format!("invalid Herdr event: {error}"))?;
+                if let Some(error) = event.get("error") {
+                    return Err(format!("Herdr event subscription failed: {error}"));
+                }
+                Ok(true)
+            }
             Err(error)
                 if matches!(
                     error.kind(),
@@ -878,6 +894,22 @@ fn herdr_socket_path() -> Result<std::ffi::OsString, String> {
 
 #[cfg(test)]
 mod herdr_tests {
+    #[cfg(unix)]
+    #[test]
+    fn lost_events_require_resubscription_before_refresh() {
+        use std::io::{BufReader, Write};
+        use std::os::unix::net::UnixStream;
+        let (reader, mut writer) = UnixStream::pair().unwrap();
+        let mut subscriber = super::EventSubscriber {
+            reader: BufReader::new(reader),
+        };
+        writeln!(writer, "{}", serde_json::json!({"id":"herdr-fwd:watch","error":{"code":"events_lost","message":"history overrun"}})).unwrap();
+        assert!(subscriber
+            .wait(std::time::Duration::from_millis(100))
+            .unwrap_err()
+            .contains("events_lost"));
+    }
+
     use std::{
         collections::{BTreeMap, HashMap},
         ffi::OsString,

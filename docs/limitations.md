@@ -34,9 +34,9 @@
   clients, so the dashboard's focus action is not private to its connector.
   Generic dashboard actions reject multiple registered forwarding sessions;
   use an already-scoped dashboard or set `HERDR_FWD_SESSION_PATH` explicitly.
-- The wrapper still handles one `herdr --remote <target>` connection. Machines
-  added or switched through `herdr machine` are not automatically enrolled in
-  forwarding. The companion independently retries SSH recovery for up to
+- The wrapper handles one remote connection, selected by SSH target or by
+  `hfwd --machine <label-or-id>`. Machines switched inside Herdr are not
+  automatically enrolled in forwarding. The companion independently retries SSH recovery for up to
   30 seconds (plus any in-flight bounded command), without interactive password
   prompts. If authentication or connectivity remains unavailable, `hfwd` exits
   and cleans up. Restart `hfwd` after correcting the connection.

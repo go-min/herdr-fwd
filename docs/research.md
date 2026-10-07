@@ -1,7 +1,42 @@
 # Herdr research
 
-Research refreshed: 2026-09-08. Source checked: Herdr v0.9.0 source, bundled
-documentation, and an isolated local Herdr 0.9.0 server. This repository does not modify Herdr core.
+Research refreshed: 2026-10-07. The 0.9.0 baseline below was reviewed against
+Herdr v0.9.1–v0.9.3 release notes, v0.9.3 API schemas and documentation.
+This repository does not modify Herdr core.
+
+## Herdr 0.9.1–0.9.3 follow-up
+
+- [0.9.2 event delivery](https://github.com/herdrdev/herdr/releases/tag/v0.9.2)
+  reports `events_lost` and closes an overrun subscription. The watcher treats
+  error frames as a failed subscription, subscribes again before its next full
+  discovery scan, and uses events as invalidation signals rather than replaying
+  payloads over cached state. Subscription setup has bounded read/write waits.
+- [Saved machine CLI output](https://github.com/herdrdev/herdr/blob/v0.9.3/src/cli/machine.rs)
+  exposes `id`, `label`, `target`, `session`, and `enabled` through
+  `herdr machine list --json`. `hfwd --machine` resolves an enabled profile and
+  reuses the existing SSH companion and attach flow. It does not watch UI
+  machine switches or take over Herdr's connection management.
+- [Runtime server status](https://github.com/herdrdev/herdr/blob/v0.9.3/src/cli/status.rs)
+  exposes running state and server version separately from the installed
+  executable. `doctor` checks both and reports stale servers without restarting
+  them, including the selected remote named session.
+- [0.9.1 sidebar rules](https://github.com/herdrdev/herdr/releases/tag/v0.9.1)
+  can hide tokens. No extra rule is needed for our standalone status row:
+  discovery clears its token when no enabled automatic forwards remain.
+- No public port-forward, client-addressed browser-open, or attached-client
+  identity API was found in the
+  [0.9.3 plugin contract](https://github.com/herdrdev/herdr/blob/v0.9.3/docs/next/website/src/content/docs/plugins.mdx).
+  The separate companion remains necessary. Removed pane graphics methods
+  were not used by this project.
+- The CI smoke check pins the checksum-verified Herdr 0.9.3 Linux binary;
+  Lima provisioning pins the same release for aarch64. Compatibility remains
+  bounded to `>=0.9.0, <0.10.0`.
+
+The short real SSH check passed locally on macOS with Herdr 0.9.3, including
+saved-profile session selection, runtime server diagnostics, HTTP through SSH
+forwards, and clearing forwards and workspace metadata after process exit.
+
+## Herdr 0.9.0 baseline
 
 | Question | Verified answer | Evidence |
 | --- | --- | --- |
@@ -57,7 +92,7 @@ plugins published later.
   for scoping our focus action or forwards to a specific Herdr client.
 - `herdr machine` adds multi-machine navigation, but does not expose the
   loopback forwarding API required to replace the companion. Only the existing
-  `hfwd <target>` attach path is integrated here.
+  `hfwd <target>` attach path and saved-profile resolution are integrated here.
 - The local smoke check exercised real pane events, process inspection,
   loopback listener discovery, metadata writes, plugin linking, popup open/close,
   split dashboards, and removal cleanup with a mock HTTP companion. It did not
