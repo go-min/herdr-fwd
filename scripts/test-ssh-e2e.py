@@ -64,6 +64,8 @@ def stop(process):
 
 
 def main():
+    assert sys.argv[1:] in ([], ["--smoke"]), "usage: test-ssh-e2e.py [--smoke]"
+    smoke = sys.argv[1:] == ["--smoke"]
     herdr = shutil.which("herdr")
     sshd = shutil.which("sshd") or "/usr/sbin/sshd"
     ssh = shutil.which("ssh")
@@ -148,13 +150,15 @@ os.execv({ssh!r},[{ssh!r},'-F',{str(root/'ssh_config')!r}]+args)
         def remote(*args):
             return run(ssh, "-F", str(root / "ssh_config"), alias, shlex.join(args))
 
-        def start_client(*extra):
+        def start_client(*extra, machine=None):
             master, slave = pty.openpty()
             fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 32, 110, 0, 0))
             def controlling_terminal():
                 os.setsid()
                 fcntl.ioctl(0, termios.TIOCSCTTY, 0)
-            child = subprocess.Popen([str(wrapper), alias, *extra, "--", "--session", session], env=local_env, stdin=slave, stdout=slave, stderr=slave, preexec_fn=controlling_terminal)
+            connection = ["--machine", machine] if machine else [alias]
+            session_args = [] if machine else ["--", "--session", session]
+            child = subprocess.Popen([str(wrapper), *connection, *extra, *session_args], env=local_env, stdin=slave, stdout=slave, stderr=slave, preexec_fn=controlling_terminal)
             os.close(slave)
             clients.append(child)
             def drain():
@@ -202,9 +206,14 @@ os.execv({ssh!r},[{ssh!r},'-F',{str(root/'ssh_config')!r}]+args)
         try:
             ssh_server = start_sshd()
             eventually(lambda: remote("printf", "ready") == "ready")
-            herdr_server = subprocess.Popen([herdr, "--session", session, "server"], env=remote_env, stdout=open(root / "herdr.log", "wb"), stderr=subprocess.STDOUT)
+            if smoke:
+                run(herdr, "machine", "add", alias, "--label", "CI saved box", "--remote-session", session, env=local_env)
+                diagnostic = run(str(wrapper), "doctor", "--machine", "CI saved box", env=local_env)
+                assert "remote running Herdr server compatible (0.9.3)" in diagnostic, diagnostic
+            else:
+                herdr_server = subprocess.Popen([herdr, "--session", session, "server"], env=remote_env, stdout=open(root / "herdr.log", "wb"), stderr=subprocess.STDOUT)
             eventually(lambda: remote(herdr, "--session", session, "status", "server"))
-            child = start_client()
+            child = start_client(machine="CI saved box" if smoke else None)
             eventually(lambda: state(child))
             workspace = json.loads(remote(herdr, "--session", session, "workspace", "create", "--cwd", str(root), "--label", "SSH test"))["result"]
             pane = workspace["root_pane"]["pane_id"]
@@ -223,6 +232,19 @@ time.sleep(2)
             assert time.monotonic() - began < 12, "foreground discovery fell back to the slow scan"
             assert all(f["localPort"] != f["remotePort"] and body(f["localPort"]) for f in forwards)
             print("PASS: real SSH attach, delayed listener discovery, occupied local ports, HTTP through tunnels", flush=True)
+            if smoke:
+                workspace_id = workspace["workspace"]["workspace_id"]
+                def tokens():
+                    return json.loads(remote(herdr, "--session", session, "workspace", "get", workspace_id))["result"]["workspace"].get("tokens", {})
+                eventually(lambda: tokens().get("port_forward_status"))
+                remote(herdr, "--session", session, "pane", "send-keys", pane, "ctrl+c")
+                eventually(lambda: state(child) is not None and not state(child)["forwards"], 12)
+                eventually(lambda: "port_forward_status" not in tokens())
+                stop(child)
+                eventually(lambda: state(child) is None)
+                eventually(lambda: not list(remote_sessions.glob("session-*.json")))
+                print("PASS: saved machine/session, doctor server version, empty sidebar token, process-exit and wrapper cleanup", flush=True)
+                return
             paused, live = forwards
             api(child, f'/v1/forwards/{paused["id"]}/toggle', {"enabled": False})
             # A missing listener plus killed master simulates a transport outage;
@@ -289,8 +311,7 @@ time.sleep(2)
             if collision:
                 collision.close()
             try:
-                if herdr_server and herdr_server.poll() is None:
-                    run(herdr, "--session", session, "server", "stop", env=remote_env)
+                run(herdr, "--session", session, "server", "stop", env=remote_env)
             finally:
                 stop(herdr_server)
                 stop(ssh_server)

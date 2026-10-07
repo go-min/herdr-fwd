@@ -5,7 +5,14 @@ Versioning.
 
 ## [Unreleased]
 
+## [0.1.6] - 2026-10-07
+
 ### Added
+
+- Connect through saved Herdr profiles with `hfwd --machine <label-or-id>`.
+- Check installed binaries and running server versions separately in `doctor`,
+  including saved-machine and explicitly selected remote sessions.
+- Add `make test-herdr` and a checksum-pinned Herdr 0.9.3 real SSH CI smoke check.
 
 - Automatically recover the wrapper-owned SSH transport and reverse RPC channel
   after a disconnect, with bounded non-interactive retries and mapping replay.
@@ -25,9 +32,13 @@ Versioning.
   configuration through the authenticated companion. Keep plugin shortcuts in
   the remote server configuration. Use Herdr's menu to reload local UI settings.
 - Select dashboard colors from the connecting client's configured theme.
-- Update the Lima and Overview demo fixtures to Herdr 0.9.0.
+- Update Lima provisioning to Herdr 0.9.3 and the Overview demo to Herdr 0.9.0.
 
 ### Fixed
+
+- Resubscribe and reconcile immediately after Herdr reports `events_lost`;
+  bound event subscription setup waits.
+- Verify empty and paused automatic-forward sets clear the sidebar status token.
 
 - Refuse ambiguous `hfwd close` selectors before deleting any forwards.
 - Bound companion HTTP reads and cancel incomplete requests during shutdown.

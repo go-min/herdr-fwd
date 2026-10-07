@@ -33,7 +33,7 @@ $(error usage: run, attach, and lima-run must be invoked separately)
 endif
 endif
 
-.PHONY: help fmt fmt-check lint markdown-check markdown-fix deps-check test test-ssh build demo package package-smoke release-check ci manifest-check scripts-check \
+.PHONY: help fmt fmt-check lint markdown-check markdown-fix deps-check test test-ssh test-herdr build demo package package-smoke release-check ci manifest-check scripts-check \
 	install uninstall run attach serve lima-up lima-run lima-down lima-destroy \
 	lima-status lima-shell
 
@@ -72,6 +72,9 @@ deps-check: ## Core|Run dependency policy checks
 
 test-ssh: build ## Core|Run isolated real SSH/Herdr integration checks
 	python3 scripts/test-ssh-e2e.py
+
+test-herdr: build ## Core|Run the short Herdr 0.9.3 SSH compatibility check
+	python3 scripts/test-ssh-e2e.py --smoke
 
 test: ## Core|Run unit and integration tests
 	$(CARGO) test --locked --all-targets

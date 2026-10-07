@@ -18,6 +18,14 @@ Herdr, process discovery, and forwarding behavior is exercised with the Lima
 scenario below. There are no shared catch-all `src/tests.rs` or
 `src/bin/**/tests.rs` files.
 
+`make test-herdr` runs the short version against Herdr 0.9.3, also used by CI.
+It creates temporary SSH keys/configs and a uniquely named remote session,
+connects through a saved machine, checks `doctor`'s running-server version,
+discovers two delayed loopback listeners, verifies HTTP through real tunnels,
+and checks that process exit clears forwards and the sidebar token. It removes
+the fixture's session files and stops its server and SSH daemon on exit. The
+full `make test-ssh` run additionally exercises outages and multiple clients.
+
 Run every test target with:
 
 ```bash
@@ -282,7 +290,7 @@ port.
 
 ## Herdr 0.9 regression checks
 
-Use Herdr 0.9.0 on the connecting machine and the fixture host. Verify that
+Use Herdr 0.9.3 on the connecting machine and the fixture host. Verify that
 0.8.x and 0.10.x are rejected by `hfwd doctor` before starting a connection.
 
 In the remote dashboard, press `h`, toggle port status, and enable Herdr

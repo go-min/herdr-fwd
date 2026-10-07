@@ -21,7 +21,7 @@ demo session afterward.
 
 ## Requirements
 
-- Herdr 0.9.x on both the local connecting machine and remote plugin host;
+- Herdr 0.9.x on both the local connecting machine and remote plugin host (0.9.3 recommended);
 - macOS or Linux;
 - `ps` plus `lsof` on macOS, or `ps` plus `lsof`/`ss` on Linux;
 - `git`, `curl`, `tar`, and `sha256sum` or `shasum` for direct plugin install;
@@ -117,7 +117,7 @@ brew install go-min/tap/herdr-fwd
 ```
 
 The script installs to `~/.local/bin` by default. Pin a release with
-`--version 0.1.5`, or download and inspect the root `install.sh` before running
+`--version 0.1.6`, or download and inspect the root `install.sh` before running
 it. The installed command is `hfwd`; the project and Homebrew formula remain
 named `herdr-fwd`. Homebrew upgrades use the standard
 `brew upgrade herdr-fwd` command.
@@ -144,6 +144,18 @@ Replace `<target>` with the SSH host or alias for the remote machine. The
 matching plugin version on that host, and launches `herdr --remote <target>`.
 Every detected development listener is forwarded automatically. The dashboard
 destination is configured in Herdr: Space, dashboard popup, or nothing.
+For an enabled saved Herdr machine, use its unique label or ID instead:
+
+```bash
+hfwd --machine "Build box" --open
+hfwd doctor --machine "Build box"
+```
+
+This uses the profile's SSH target and remote session. Unknown, disabled, or
+ambiguous labels fail; use an ID to distinguish duplicate labels. Session and
+target overrides are rejected. Switching machines inside Herdr does not start
+additional forwarding sessions; launch `hfwd` separately for each machine.
+
 Inside a remote pane, start a development server as usual:
 
 ```bash
@@ -173,6 +185,7 @@ must remain available for unattended recovery.
 hfwd <target> --open
 hfwd <target> -- --session agents
 hfwd doctor <target>
+hfwd doctor <target> -- --session agents
 hfwd list
 hfwd status
 hfwd forward <target> 4173
@@ -184,6 +197,10 @@ hfwd close-all
 `hfwd forward` adds a persistent manual loopback mapping to an already active
 session. The optional final port chooses the local port; otherwise it uses the
 same port as the remote service.
+For a saved-machine connection, manual commands use its resolved SSH target.
+`hfwd doctor` checks installed binaries and running servers separately, reports
+version differences, and never restarts a server. Named-session checks use
+`-- --session <name>` or the saved profile's session.
 
 To keep typing the normal Herdr command, install the shell hook once. The
 command detects zsh, Bash, or Fish from `$SHELL` and updates only that shell's

@@ -50,3 +50,26 @@ jobs:
         with:
           toolchain: "1.82"
       - run: cargo +1.82 check --all-targets --all-features --locked
+
+  herdr:
+    timeout-minutes: 15
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: stable
+      - name: Install Herdr 0.9.3 and SSH test prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y openssh-server lsof
+          sudo mkdir -p /run/sshd
+          curl -fsSL https://github.com/herdrdev/herdr/releases/download/v0.9.3/herdr-linux-x86_64 -o "$RUNNER_TEMP/herdr"
+          echo "18a8dc65f1c2fa485884344356dea1cfd911c6f06cf46fa78e193f4087f4dba7  $RUNNER_TEMP/herdr" | sha256sum -c -
+          mkdir -p "$HOME/.local/bin"
+          install -m 755 "$RUNNER_TEMP/herdr" "$HOME/.local/bin/herdr"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - run: make test-herdr
